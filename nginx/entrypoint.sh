@@ -212,9 +212,11 @@ if [ ! -f "$AUTODISCOVER_CONFIG_FILE" ]; then
     echo "No autodiscover-config.php found. Copying default..."
     cp "$ZPUSH_SRC/autodiscover/config.php" "$AUTODISCOVER_CONFIG_FILE"
     chown www-data:www-data "$AUTODISCOVER_CONFIG_FILE"
-    # Also link it to where Z-Push expects to find it
-    ln -sf "$AUTODISCOVER_CONFIG_FILE" "$ZPUSH_SRC/autodiscover/config.php"
 fi
+# Symlink unconditionally — matches the main config pattern above, so
+# the link survives container restarts when the config file is already
+# present in the persistent volume.
+ln -sf "$AUTODISCOVER_CONFIG_FILE" "$ZPUSH_SRC/autodiscover/config.php"
 
 # --- Enforce Correct Paths in BOTH Config Files ---
 echo "Verifying and setting persistent data paths..."
@@ -225,6 +227,31 @@ sed -i -E "s#^(\s*define\('LOGFILEDIR',).*#\1 '$LOG_DIR/');#" "$MAIN_CONFIG_FILE
 sed -i -E "s#^(\s*define\('BACKEND_PROVIDER',\s*)'[^']*'#\1'BackendStalwart'#" "$MAIN_CONFIG_FILE"
 # Autodiscover config
 sed -i -E "s#^(\s*define\('LOGFILEDIR',).*#\1 '$LOG_DIR/');#" "$AUTODISCOVER_CONFIG_FILE"
+# Same backend pinning as the main config. Without this, autodiscover's
+# config has BACKEND_PROVIDER='' which falls through to BackendKopano in
+# lib/core/zpush.php::$autoloadBackendPreference, which then fatals on
+# the missing PHP-MAPI extension.
+sed -i -E "s#^(\s*define\('BACKEND_PROVIDER',\s*)'[^']*'#\1'BackendStalwart'#" "$AUTODISCOVER_CONFIG_FILE"
+# Stalwart account names are full email addresses (e.g. user@domain.tld).
+# The autodiscover stock default strips to the local part, which Stalwart
+# then rejects with a 401.
+sed -i -E "s#^(\s*define\('USE_FULLEMAIL_FOR_LOGIN',\s*)(true|false)#\1true#" "$AUTODISCOVER_CONFIG_FILE"
+
+# When clients hit autodiscover at a separate hostname (e.g.
+# autodiscover.example.com), Z-Push's createResponse() falls back to
+# $_SERVER['HTTP_HOST'] for the EAS server URL — so the autodiscover
+# response tells the device "use https://autodiscover.example.com/
+# Microsoft-Server-ActiveSync" which is cosmetically wrong (devices
+# show autodiscover.* as their server) even though it works at the TLS
+# layer if the same cert covers both names. Set ZPUSH_HOST so the
+# autodiscover response always carries the canonical EAS hostname.
+if [ -n "${ZPUSH_HOST:-}" ]; then
+    if grep -qE "^\s*//\s*define\('ZPUSH_HOST'" "$AUTODISCOVER_CONFIG_FILE"; then
+        sed -i -E "s#^\s*//\s*define\('ZPUSH_HOST',\s*'[^']*'\);#    define('ZPUSH_HOST', '${ZPUSH_HOST}');#" "$AUTODISCOVER_CONFIG_FILE"
+    elif grep -qE "^\s*define\('ZPUSH_HOST'" "$AUTODISCOVER_CONFIG_FILE"; then
+        sed -i -E "s#^(\s*define\('ZPUSH_HOST',\s*)'[^']*'#\1'${ZPUSH_HOST}'#" "$AUTODISCOVER_CONFIG_FILE"
+    fi
+fi
 
 # --- Configure Stalwart Backend from Environment Variables ---
 STALWART_CONFIG="/var/www/zpush/backend/stalwart/config.php"

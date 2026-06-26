@@ -460,6 +460,16 @@ class BackendStalwart extends BackendDiff {
             $this->_protocolversion = "N/A";
         }
 
+        // Autodiscover's login() passes $username straight from
+        // SimpleXMLElement ($incomingXml->Request->EMailAddress) — PHP
+        // auto-stringifies that in concat/sprintf contexts (which is
+        // why ZLog renders it correctly), but the Rust FFI's typed
+        // String parameter on jmap_connect rejects it with
+        // "Invalid value given for argument `username`". Cast to
+        // string here so the backend is robust to either caller shape.
+        $username = (string) $username;
+        $password = (string) $password;
+
         ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->Logon(): START { user: ' . $username . ', backend_version: ' . $this->GetBackendVersion() . ' }');
 
         $this->mainUser = $username;
@@ -1872,7 +1882,25 @@ class BackendStalwart extends BackendDiff {
         $data = array();
 
         if (isset($appt->subject)) $data['title'] = $appt->subject;
-        if (isset($appt->location)) $data['location'] = $appt->location;
+        // JMAP CalendarEvent (RFC 8984) takes `locations`: a map keyed
+        // by an arbitrary id, with each value being a Location object
+        // (`@type: Location`, `name`, etc.). Stalwart rejects the
+        // singular `location` shape we used to send with
+        // {"description":"Invalid property.","properties":["location"],
+        // "type":"invalidProperties"}. Round-trip is fine even after
+        // this: the Rust crate's extract_calendar_location() already
+        // flattens the read-side locations map back into a single
+        // string at the FFI boundary, so device-side EAS only ever
+        // sees `$appt->location` regardless of which shape Stalwart
+        // stores.
+        if (isset($appt->location) && $appt->location !== '') {
+            $data['locations'] = array(
+                '1' => array(
+                    '@type' => 'Location',
+                    'name'  => (string) $appt->location,
+                ),
+            );
+        }
         if (isset($appt->uid)) $data['uid'] = $appt->uid;
 
         // Start time and timezone
@@ -1930,16 +1958,39 @@ class BackendStalwart extends BackendDiff {
             if ($bodyData != '') $data['description'] = $bodyData;
         }
 
-        // Participants (organizer + attendees)
+        // Participants (organizer + attendees).
+        //
+        // iOS and several other EAS clients don't populate
+        // organizername/organizeremail on the SyncAppointment for events
+        // the user is creating — they assume the server knows who's
+        // signed in. Z-Push surfaces that gap as a WARN ("Parameter
+        // 'organizername' and 'organizeremail' should be set for a
+        // meeting request") and then continues. We hit Stalwart's
+        // JMAP CalendarEvent/set without an organizer in the
+        // participants map, which means there's no `roles.owner`
+        // participant, which means Stalwart's scheduling layer has no
+        // basis to fire iTIP and the attendees never receive an
+        // invitation email.
+        //
+        // Fill in the authenticated user as organizer when EAS
+        // doesn't. Safe because $this->_user is the same identity
+        // Stalwart used to authenticate the JMAP session, so the
+        // ownership claim matches what the backend will accept.
+        $organizerEmail = (isset($appt->organizeremail) && $appt->organizeremail != '')
+            ? $appt->organizeremail
+            : $this->_user;
+        $organizerName = (isset($appt->organizername) && $appt->organizername != '')
+            ? $appt->organizername
+            : null;
+
         $participants = array();
-        if (isset($appt->organizeremail) && $appt->organizeremail != '') {
-            $org = array(
-                'roles' => array('owner' => true, 'attendee' => true, 'chair' => true),
-                'sendTo' => array('imip' => 'mailto:' . $appt->organizeremail),
-            );
-            if (isset($appt->organizername)) $org['name'] = $appt->organizername;
-            $participants['p0'] = $org;
-        }
+        $org = array(
+            'roles' => array('owner' => true, 'attendee' => true, 'chair' => true),
+            'sendTo' => array('imip' => 'mailto:' . $organizerEmail),
+        );
+        if ($organizerName !== null) $org['name'] = $organizerName;
+        $participants['p0'] = $org;
+
         if (isset($appt->attendees) && is_array($appt->attendees)) {
             $ai = 1;
             foreach ($appt->attendees as $att) {
@@ -2136,6 +2187,17 @@ class BackendStalwart extends BackendDiff {
         if (empty($mime)) {
             ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->SendMail(): Empty MIME content');
             return false;
+        }
+
+        // Z-Push doesn't guarantee Setup() runs before SendMail() — the EAS
+        // request processor dispatches the SendMail command directly without
+        // a preceding FolderSync. Each PHP-FPM worker handles requests with
+        // a fresh backend instance, so $this->_folders / $this->_sentID
+        // start empty and stay empty unless we populate them here. Without
+        // this call, the "No folders available" path below always fires and
+        // every outbound message gets stuck in the device's Outbox.
+        if (empty($this->_folders) && method_exists($this, 'Setup')) {
+            $this->Setup($this->_user);
         }
 
         // Ensure we have the sent folder ID
