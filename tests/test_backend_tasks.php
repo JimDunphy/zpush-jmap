@@ -110,6 +110,114 @@ $tests['Completed tasks include the required completion date']=function() {
     list($b,$c)=fixture(); $c->objects['undated']['progress']='completed'; $c->objects['undated']['updated']='2026-10-28T13:00:00Z';
     $t=$b->GetMessage('task-a','undated',new ContentParameters());
     check($t->complete===1 && $t->datecompleted===strtotime('2026-10-28T13:00:00Z'),'Missing required completion date');
+    $c->objects['undated']['progressUpdated']='';
+    check($b->GetMessage('task-a','undated',new ContentParameters())->datecompleted===$t->datecompleted,'Empty preferred date hid native modification time');
+};
+$tests['Partial progress remains incomplete while full completion is distinct on the wire']=function() {
+    list($b,$c)=fixture();
+    foreach (array(10,90,100) as $percent) {
+        $c->objects['task-1']['percentComplete']=$percent;
+        $c->objects['task-1']['progress']=$percent===100 ? 'completed' : 'in-process';
+        $c->objects['task-1']['progressUpdated']='2026-10-28T13:00:00Z';
+        $task=$b->GetMessage('task-a','task-1',new ContentParameters());
+        $out=fopen('php://temp','w+'); $enc=new WBXMLEncoder($out); $enc->startWBXML(); $enc->startTag(SYNC_DATA); $task->Encode($enc); $enc->endTag(); rewind($out);
+        $dec=new WBXMLDecoder($out); check($dec->getElementStartTag(SYNC_DATA),'Missing task data'); $decoded=new SyncTask(); check($decoded->Decode($dec)!==false,'Task decode failed');
+        check(intval($decoded->complete)===($percent===100 ? 1 : 0),'Incorrect completion flag for '.$percent.' percent');
+        if ($percent===100) check(intval($decoded->datecompleted)===strtotime('2026-10-28T13:00:00Z'),'Completion date missing on wire');
+        else check(!isset($decoded->datecompleted),'Incomplete task has a completion date');
+        fclose($out);
+    }
+};
+$tests['Completed task without native timestamps includes a valid date in a real Sync change']=function() {
+    list($b,$c)=fixture();
+    $c->objects['undated']['progress']='completed'; $c->objects['undated']['percentComplete']=100;
+    // Exercise the real export stream and semantic checks, not only the PHP
+    // object's fields: Streamer suppresses zero-valued dates by default.
+    $property=new ReflectionProperty(ZPush::class,'deviceManager'); $previous=$property->getValue();
+    $property->setValue(null,new class {
+        public function DoNotStreamMessage($id,&$message) {return !$message->Check(true);}
+        public function IsKoe() {return false;}
+    });
+    try {
+        $out=fopen('php://temp','w+'); $encoder=new WBXMLEncoder($out); $encoder->startWBXML(); $encoder->startTag(SYNC_SYNCHRONIZE);
+        $importer=new ImportChangesStream($encoder,new SyncTask());
+        $task=$b->GetMessage('task-a','undated',new ContentParameters()); $task->flags=0;
+        check($importer->ImportMessageChange('undated',$task)===true,'Task rejected by stream importer');
+        $encoder->endTag(); rewind($out); $bytes=stream_get_contents($out); rewind($out);
+        check(str_contains($bytes,'1970-01-01T00:00:00.000Z'),'DateCompleted was empty instead of a valid timestamp');
+        $decoder=new WBXMLDecoder($out);
+        check($decoder->getElementStartTag(SYNC_SYNCHRONIZE),'Missing Sync');
+        check($decoder->getElementStartTag(SYNC_MODIFY),'Missing Change');
+        check($decoder->getElementStartTag(SYNC_SERVERENTRYID),'Missing task ID'); check($decoder->getElementContent()==='undated','Wrong task ID'); check($decoder->getElementEndTag(),'Missing task ID end');
+        check($decoder->getElementStartTag(SYNC_DATA),'Missing application data');
+        $decoded=new SyncTask(); check($decoded->Decode($decoder)!==false,'Invalid task wire data');
+        check(intval($decoded->complete)===1 && isset($decoded->datecompleted) && $decoded->datecompleted===0,'Completion/date pair lost on wire');
+        fclose($out);
+    } finally {$property->setValue(null,$previous);}
+};
+$tests['Previously sent timestamp-less completions resend once without resetting other tasks']=function() {
+    list($b,$c)=fixture(); $c->objects['undated']['progress']='completed'; $c->objects['undated']['percentComplete']=100;
+    $legacy=array_map(fn($t)=>array('id'=>$t->id,'flags'=>1,'mod'=>hash('sha256',$t->data_json)),$c->getTasks(array('task-1','undated')));
+    $cp=new ContentParameters(); $cp->SetContentClass('Tasks'); $importer=false;
+    $exporter=$b->GetExporter('task-a'); $exporter->Config($legacy); $exporter->ConfigContentParameters($cp); $exporter->InitializeExporter($importer);
+    check($exporter->GetChangeCount()===1,'Corrected completion was not retried independently of unchanged tasks');
+    $exporter->Config($b->GetMessageList('task-a',0)); $exporter->InitializeExporter($importer);
+    check($exporter->GetChangeCount()===0,'Corrected task would resend on every request');
+};
+$tests['Epoch completion encoding leaves unrelated zero date fields unchanged']=function() {
+    $task=new SyncTask(); $task->complete=1; $task->datecompleted=0; $task->startdate=0; $task->duedate=0;
+    $out=fopen('php://temp','w+'); $encoder=new WBXMLEncoder($out); $encoder->startWBXML(); $encoder->startTag(SYNC_DATA); $task->Encode($encoder); $encoder->endTag(); rewind($out);
+    check(substr_count(stream_get_contents($out),'1970-01-01T00:00:00.000Z')===1,'Other absent dates became epoch values'); fclose($out);
+    $task->complete=0;
+    $out=fopen('php://temp','w+'); $encoder=new WBXMLEncoder($out); $encoder->startWBXML(); $encoder->startTag(SYNC_DATA); $task->Encode($encoder); $encoder->endTag(); rewind($out);
+    check(!str_contains(stream_get_contents($out),'1970-01-01T00:00:00.000Z'),'Incomplete task acquired a completion date'); fclose($out);
+};
+$tests['Empty legacy folder mapping cannot swallow a task completion notification']=function() {
+    list($b,$c)=fixture();
+    $device=new ASDevice('dummydevice','iPhone','dummy@example.test','Test');
+    // Reproduce an existing profile: real legacy task folder plus an empty-ID
+    // hierarchy entry whose backend ID accidentally shadows that same folder.
+    $device->SetDataArray(array('contentdata'=>array(
+        ''=>array(ASDevice::FOLDERTYPE=>SYNC_FOLDER_TYPE_USER_TASK,ASDevice::FOLDERBACKENDID=>'task-a'),
+        'task-a'=>array(ASDevice::FOLDERTYPE=>SYNC_FOLDER_TYPE_TASK,ASDevice::FOLDERUUID=>'task-state'),
+    )));
+    $saved=$device->GetDataArray();
+    $state=$b->GetMessageList('task-a',0);
+    $b->ChangesSinkInitialize('task-a');
+    $c->objects['task-1']['progress']='completed'; $c->objects['task-1']['percentComplete']=100; $c->state='2';
+    $notified=$b->ChangesSink(0);
+    check($notified===array('task-a'),'Task change notification missing');
+    $folder=$device->GetFolderIdForBackendId($notified[0],false,DeviceManager::FLD_ORIGIN_USER,null);
+    check($folder==='task-a','Task notification was redirected to an empty folder ID');
+    check($device->GetDataArray()===$saved,'Lookup rewrote existing device state');
+    $importer=new class {
+        public $tasks=array();
+        public function ImportMessageChange($id,$task) { $this->tasks[$id]=$task; return true; }
+    };
+    $cp=new ContentParameters(); $cp->SetContentClass('Tasks');
+    $exporter=$b->GetExporter($folder); $exporter->Config($state); $exporter->ConfigContentParameters($cp); $exporter->InitializeExporter($importer);
+    check($exporter->GetChangeCount()===1,'Completion did not produce exactly one change');
+    while (is_array($exporter->Synchronize())) {}
+    check($importer->tasks['task-1']->complete===1,'Exporter lost completion');
+};
+$tests['Empty folder IDs are rejected and valid short folder mappings still resolve']=function() {
+    $device=new ASDevice('dummydevice','iPhone','dummy@example.test','Test');
+    check($device->SetFolderBackendId('','task-a')===false,'Accepted empty client folder ID');
+    check($device->SetFolderBackendId(null,'task-a')===false,'Accepted null client folder ID');
+    check($device->SetFolderBackendId('U12345','')===false,'Accepted empty backend folder ID');
+    check($device->SetFolderBackendId('U12345',null)===false,'Accepted null backend folder ID');
+    $device->SetDataArray(array('contentdata'=>array(
+        'U12345'=>array(ASDevice::FOLDERBACKENDID=>'task-a'),
+        ''=>array(ASDevice::FOLDERBACKENDID=>'task-a'),
+    )));
+    check($device->GetFolderIdForBackendId('task-a',false,DeviceManager::FLD_ORIGIN_USER,null)==='U12345','Empty mapping shadowed a real short ID');
+    check($device->GetFolderIdForBackendId('unknown',false,DeviceManager::FLD_ORIGIN_USER,null)==='unknown','Unknown folder fallback changed');
+    $shared=new ASDevice('dummydevice','iPhone','dummy@example.test','Test');
+    $shared->SetDataArray(array('contentdata'=>array(
+        ''=>array(ASDevice::FOLDERBACKENDID=>'task-a'),
+        'S12345'=>array(ASDevice::FOLDERBACKENDID=>'task-a'),
+    )));
+    check($shared->GetFolderIdForBackendId('task-a',false,DeviceManager::FLD_ORIGIN_USER,null)==='S12345','Origin fallback selected an empty mapping');
 };
 $tests['HTML task notes are readable and previews retain size metadata']=function() {
     list($b,$c)=fixture(); $c->objects['task-1']['description']='<p>Hello world</p>'; $c->objects['task-1']['descriptionContentType']='text/html';
@@ -133,6 +241,7 @@ $tests['Create, complete, reopen and delete a native task']=function() {
     list($b,$c)=fixture(); $t=new SyncTask(); $t->subject='New task'; $t->complete=0; $t->body='Notes';
     $stat=$b->ChangeMessage('task-a',false,$t,new ContentParameters()); check(is_array($stat),'Create failed'); $id=$stat['id'];
     check($c->objects[$id]['@type']==='Task' && !empty($c->objects[$id]['uid']),'Missing native identity');
+    check(!array_key_exists('progressUpdated',$c->objects[$id]),'New incomplete Task sent an unsupported null completion timestamp');
     $change=new SyncTask(); $change->complete=1; $change->datecompleted=strtotime('2026-10-28T16:00:00Z');
     check($b->ChangeMessage('task-a',$id,$change,new ContentParameters())!==false,'Complete failed');
     check($b->GetMessage('task-a',$id,new ContentParameters())->datecompleted===$change->datecompleted,'Completion time lost');

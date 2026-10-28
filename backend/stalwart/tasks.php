@@ -8,7 +8,21 @@ trait StalwartTasks {
     }
 
     private function TaskStat($task) {
-        return array('id' => $task->id, 'flags' => 1, 'mod' => hash('sha256', $task->data_json));
+        $data = $this->TaskData($task);
+        // Versions through 0.2.3 sent an empty DateCompleted for these tasks.
+        // Change only their fingerprint once so the corrected wire data is
+        // exported even when the native object has not changed since then.
+        $revision = (($data['progress'] ?? '') === 'completed' && $this->TaskCompletionTimestamp($data) === 0)
+            ? "\0task-completed-epoch-v1" : '';
+        return array('id' => $task->id, 'flags' => 1, 'mod' => hash('sha256', $task->data_json . $revision));
+    }
+
+    private function TaskCompletionTimestamp($data) {
+        foreach (array('progressUpdated', 'updated', 'created') as $property) {
+            $timestamp = $this->TaskTimestamp($data[$property] ?? null);
+            if ($timestamp !== null) return $timestamp;
+        }
+        return 0;
     }
 
     private function ReadTask($folderid, $id) {
@@ -80,7 +94,9 @@ trait StalwartTasks {
         if ($output->complete) {
             // ActiveSync requires DateCompleted. Prefer the native completion
             // timestamp, then modification/creation time; epoch denotes unknown.
-            $output->datecompleted = $this->TaskTimestamp($data['progressUpdated'] ?? $data['updated'] ?? $data['created'] ?? null) ?? 0;
+            // The Z-Push compatibility patch serializes epoch as a real date,
+            // rather than emitting an empty required DateCompleted element.
+            $output->datecompleted = $this->TaskCompletionTimestamp($data);
         }
         $priority = $data['priority'] ?? 0;
         $output->importance = ($priority >= 1 && $priority <= 4) ? 2 : (($priority >= 6) ? 0 : 1);
@@ -134,7 +150,13 @@ trait StalwartTasks {
         if (isset($input->complete) && (empty($id) || (bool)$input->complete !== (($existing['progress'] ?? '') === 'completed'))) {
             $data['progress'] = $input->complete ? 'completed' : 'needs-action';
             $data['percentComplete'] = $input->complete ? 100 : 0;
-            $data['progressUpdated'] = $input->complete ? gmdate('Y-m-d\TH:i:s\Z', $input->datecompleted ?? time()) : null;
+            if ($input->complete) {
+                $data['progressUpdated'] = gmdate('Y-m-d\TH:i:s\Z', $input->datecompleted ?? time());
+            } elseif (!empty($existing['progressUpdated'])) {
+                // An incomplete new task has no completion timestamp to clear.
+                // Older Stalwart releases reject even a null progressUpdated.
+                $data['progressUpdated'] = null;
+            }
         }
         if (isset($input->body)) {
             $data['description'] = $input->body;
@@ -169,8 +191,11 @@ trait StalwartTasks {
                 }
             }
         }
-        if (empty($id)) $id = $this->_jmapClient->createCalendarEvent($this->_folders[$index]->jmapId, json_encode($data, JSON_THROW_ON_ERROR));
+        $creating = empty($id);
+        if ($creating) $id = $this->_jmapClient->createCalendarEvent($this->_folders[$index]->jmapId, json_encode($data, JSON_THROW_ON_ERROR));
         elseif (!empty($data)) $this->_jmapClient->updateCalendarEvent($id, json_encode($data, JSON_THROW_ON_ERROR));
-        return $this->StatMessage($folderid, $id);
+        $stat = $this->StatMessage($folderid, $id);
+        if ($stat !== false) ZLog::Write(LOGLEVEL_INFO, 'Stalwart->ChangeTaskMessage(): ' . ($creating ? 'created' : 'updated') . ' task=' . $id . ' folder=' . $folderid);
+        return $stat;
     }
 }

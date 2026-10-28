@@ -1843,6 +1843,46 @@ const JMAP_CAPS: [&str; 5] = [
 ];
 
 impl JmapClient {
+    fn calendar_set_request(&self, mut args: Value) -> Result<Value, String> {
+        // A compatibility retry is safe only after an explicit per-object
+        // rejection. Never replay an Add after a transport/ambiguous failure.
+        for attempt in 0..2 {
+            let resp = self.jmap_request(vec![json!(["CalendarEvent/set", args, "s0"])])?;
+            let retry = if attempt == 0 {
+                [ ("create", "notCreated", "created"), ("update", "notUpdated", "updated") ]
+                    .iter().find_map(|(operation, rejected, accepted)| {
+                        let objects = args.get(*operation)?.as_object()?;
+                        if objects.len() != 1 { return None; }
+                        let (id, object) = objects.iter().next()?;
+                        if object.get("progressUpdated").is_none() { return None; }
+                        let payload = find_method_response(&resp, "CalendarEvent/set")?;
+                        if payload.get(*accepted).and_then(Value::as_object)
+                            .map_or(false, |items| items.contains_key(id)) { return None; }
+                        let error = payload.get(*rejected)?.get(id)?;
+                        let properties = error.get("properties")?.as_array()?;
+                        if error.get("type").and_then(Value::as_str) != Some("invalidProperties")
+                            || properties.len() != 1
+                            || properties[0].as_str().map(|s| s.trim_start_matches('/')) != Some("progressUpdated") {
+                            return None;
+                        }
+                        let is_task = if *operation == "create" {
+                            object.get("@type").and_then(Value::as_str) == Some("Task")
+                        } else {
+                            matches!(self.get_tasks(vec![id.clone()]), Ok(tasks) if tasks.iter().any(|task| task.id == *id))
+                        };
+                        if is_task { Some((operation.to_string(), id.clone())) } else { None }
+                    })
+            } else { None };
+            if let Some((operation, id)) = retry {
+                args[&operation][&id].as_object_mut().expect("calendar patch object")
+                    .remove("progressUpdated");
+                continue;
+            }
+            return Ok(resp);
+        }
+        unreachable!("calendar compatibility retry is bounded")
+    }
+
     fn jmap_request(&self, method_calls: Vec<Value>) -> Result<Value, String> {
         let request = json!({
             "using": JMAP_CAPS,
@@ -3182,14 +3222,10 @@ impl JmapClient {
         create_map.insert("k0".to_string(), Value::Object(create_obj));
 
         let resp = self
-            .jmap_request(vec![json!([
-                "CalendarEvent/set",
-                {
-                    "accountId": &self.account_id,
-                    "create": Value::Object(create_map)
-                },
-                "s0"
-            ])])
+            .calendar_set_request(json!({
+                "accountId": &self.account_id,
+                "create": Value::Object(create_map)
+            }))
             .map_err(php_err)?;
 
         if let Some(err) = check_jmap_error(&resp, "s0") {
@@ -3223,14 +3259,10 @@ impl JmapClient {
         update_map.insert(id.clone(), data);
 
         let resp = self
-            .jmap_request(vec![json!([
-                "CalendarEvent/set",
-                {
-                    "accountId": &self.account_id,
-                    "update": Value::Object(update_map)
-                },
-                "s0"
-            ])])
+            .calendar_set_request(json!({
+                "accountId": &self.account_id,
+                "update": Value::Object(update_map)
+            }))
             .map_err(php_err)?;
 
         if let Some(err) = check_jmap_error(&resp, "s0") {

@@ -8,7 +8,7 @@ The system has three layers:
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  Z-Push Framework (upstream, not modified)            │
+│  Z-Push Framework (with compatibility patch)          │
 │  Receives ActiveSync XML, calls BackendDiff methods   │
 └──────────────────┬───────────────────────────────────┘
                    │  PHP method calls
@@ -294,6 +294,16 @@ The Dockerfile has two stages:
 
 1. **rust-builder** — `rust:bookworm` with `clang` and `php-dev`, compiles `libstalwart_zpush.so`
 2. **Final image** — `debian:bookworm-slim` with Nginx, PHP-FPM, and Z-Push. Copies the `.so` from stage 1.
+
+The final stage applies `backend/stalwart/zpush-compat.patch` to Z-Push's
+`ASDevice` class. It rejects empty mapping writes and ignores existing empty
+folder IDs during reverse lookup, so a malformed hierarchy entry cannot swallow
+a notification for a real folder. It preserves device state and valid folder
+mappings. The patch must apply without fuzz; upstream upgrades require review.
+It also changes the streamer's date encoding for a completed task's epoch
+`DateCompleted`: send a valid dateTime value instead of an empty required field.
+Other zero-valued date fields retain upstream behavior. Task fingerprints include
+a wire revision only for affected completed items so their repair resends once.
 
 The Rust build is cached by Docker layers. After the first build, only PHP/config changes trigger a fast rebuild (~3 seconds).
 

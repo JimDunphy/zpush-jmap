@@ -9,7 +9,7 @@ updates an existing installation; use QUICK_START.md for a first installation.
 
 ```bash
 cd zpush-jmap/nginx
-./manage.sh --set-image local/zpush:0.2.1
+./manage.sh --set-image local/zpush:0.2.4
 ./manage.sh --build --refresh
 ```
 
@@ -23,7 +23,11 @@ The root `VERSION` file is the authoritative application version, using
 `major.minor.patch` numbering (and optional prerelease/build identifiers).
 Before 1.0, increment the minor version for a feature release and patch for
 compatible fixes. Task support was introduced in 0.2.0; 0.2.1 adds management
-convenience and removes a private hostname from an example. Update VERSION before
+convenience and generic deployment examples. Version 0.2.2 fixes task writes on
+servers that reject the optional completion timestamp. Version 0.2.3 fixes
+push notifications hidden by an empty saved device folder mapping. Version 0.2.4
+fixes empty completion dates when native timestamps are absent and resends the
+affected task responses once. Update VERSION before
 building the next application release. Rebuilds of the same application version
 can use distinct image tags; their exact identity is the image ID/source hash.
 

@@ -32,19 +32,19 @@ other applications on 443.
 ## 2. Build and export on the development machine
 
 Start from a checkout of this source. Use a release tag of your choice consistently
-on both hosts; the commands below use the application release `local/zpush:0.2.1`
+on both hosts; the commands below use the application release `local/zpush:0.2.4`
 as an example. The current application version is recorded in root `VERSION`.
 
 ```bash
 cd zpush-jmap/nginx
 ./manage.sh --init
-./manage.sh --set-image local/zpush:0.2.1
+./manage.sh --set-image local/zpush:0.2.4
 ./manage.sh --build --refresh
 ./manage.sh --verify-image
-./manage.sh --export-image /tmp/zpush-0.2.1.tar.gz
+./manage.sh --export-image /tmp/zpush-0.2.4.tar.gz
 cd /tmp
-sha256sum zpush-0.2.1.tar.gz > zpush-0.2.1.tar.gz.sha256
-scp zpush-0.2.1.tar.gz zpush-0.2.1.tar.gz.sha256 admin@sync-host:/tmp/
+sha256sum zpush-0.2.4.tar.gz > zpush-0.2.4.tar.gz.sha256
+scp zpush-0.2.4.tar.gz zpush-0.2.4.tar.gz.sha256 admin@sync-host:/tmp/
 ```
 
 If Docker bridge networking is unavailable during compilation, set
@@ -76,11 +76,11 @@ cd zpush-jmap/nginx
 Edit `nginx/.env` in this checkout:
 
 ```dotenv
-ZPUSH_IMAGE=local/zpush:0.2.1
+ZPUSH_IMAGE=local/zpush:0.2.4
 ZPUSH_BIND_ADDRESS=127.0.0.1
 ZPUSH_HTTP_PORT=10000
 STALWART_URL=https://stalwart.example.com
-STALWART_BACKEND_VERSION=0.2.1
+STALWART_BACKEND_VERSION=0.2.4
 STALWART_SSL_VERIFYPEER=true
 STALWART_SSL_VERIFYHOST=true
 STALWART_ALLOW_INSECURE_HTTP=false
@@ -97,9 +97,9 @@ Verify the transferred archive, then return to the deployment checkout:
 
 ```bash
 cd /tmp
-sha256sum -c zpush-0.2.1.tar.gz.sha256
+sha256sum -c zpush-0.2.4.tar.gz.sha256
 cd /path/to/zpush-jmap/nginx
-./manage.sh --import-image /tmp/zpush-0.2.1.tar.gz
+./manage.sh --import-image /tmp/zpush-0.2.4.tar.gz
 ./manage.sh --up-no-build
 ./manage.sh --health
 ./manage.sh --version

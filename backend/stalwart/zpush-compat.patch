@@ -1,0 +1,47 @@
+--- a/lib/core/asdevice.php
++++ b/lib/core/asdevice.php
+@@ -638,7 +638,8 @@
+      * @return boolean      true if the type was set or updated
+      */
+     public function SetFolderBackendId($folderid, $backendfolderid) {
+-        if($folderid === $backendfolderid || $folderid === false || $backendfolderid === false) {
++        if($folderid === $backendfolderid || $folderid === false || $backendfolderid === false
++            || $folderid === null || $backendfolderid === null || $folderid === '' || $backendfolderid === '') {
+             return false;
+         }
+ 
+@@ -679,7 +680,10 @@
+         if ($this->backend2folderidCache === false) {
+             $this->backend2folderidCache = array();
+             foreach ($this->contentData as $folderid => $data) {
+-                if (isset($data[self::FOLDERBACKENDID])) {
++                // Older hierarchy state can contain an empty client folder ID.
++                // Never let it shadow a real mapping or the legacy identity ID.
++                if ((string) $folderid !== '' && isset($data[self::FOLDERBACKENDID])
++                    && $data[self::FOLDERBACKENDID] !== '' && $data[self::FOLDERBACKENDID] !== false) {
+                     $this->backend2folderidCache[$data[self::FOLDERBACKENDID]] = $folderid;
+                 }
+             }
+@@ -700,7 +704,7 @@
+             // the short-id is only used if the folder is being synchronized (in contentdata) - else any chached (temporarily) ids are NOT used
+             else {
+                 foreach ($this->contentData as $folderid => $data) {
+-                    if (isset($data[self::FOLDERBACKENDID]) && $data[self::FOLDERBACKENDID] == $backendid) {
++                    if ((string) $folderid !== '' && isset($data[self::FOLDERBACKENDID]) && $data[self::FOLDERBACKENDID] == $backendid) {
+                         ZLog::Write(LOGLEVEL_DEBUG, sprintf("ASDevice->GetFolderIdForBackendId(): found backendid in contentdata but with different folder type. Lookup '%s' - synchronized id '%s'", $folderOrigin, $folderid));
+                         return $folderid;
+                     }
+--- a/lib/core/streamer.php
++++ b/lib/core/streamer.php
+@@ -317,7 +317,10 @@
+                         $encoder->startTag($tag);
+ 
+                     if(isset($map[self::STREAMER_TYPE]) && ($map[self::STREAMER_TYPE] == self::STREAMER_TYPE_DATE || $map[self::STREAMER_TYPE] == self::STREAMER_TYPE_DATE_DASHES)) {
+-                        if($this->{$map[self::STREAMER_VAR]} != 0) // don't output 1-1-1970
++                        // Completed tasks require a non-empty DateCompleted.
++                        // Preserve the epoch fallback when its native date is unknown.
++                        $epochCompletion = $tag === SYNC_POOMTASKS_DATECOMPLETED && $this instanceof SyncTask && !empty($this->complete);
++                        if($this->{$map[self::STREAMER_VAR]} != 0 || $epochCompletion)
+                             $encoder->content($this->formatDate($this->{$map[self::STREAMER_VAR]}, $map[self::STREAMER_TYPE]));
+                     }
+                     else if(isset($map[self::STREAMER_TYPE]) && $map[self::STREAMER_TYPE] == self::STREAMER_TYPE_HEX) {
