@@ -56,6 +56,7 @@ RUN set -e && \
 # Copy the Stalwart JMAP backend
 # Build context is project root, so we copy from backend/stalwart
 COPY backend/stalwart /var/www/zpush/backend/stalwart
+COPY VERSION /var/www/zpush/backend/stalwart/VERSION
 
 # Install composer dependencies
 RUN echo "Installing main Z-Push composer dependencies..." && \

@@ -10,11 +10,11 @@ This file summarizes notable third-party code and dependencies used by this repo
 
 The following files include upstream third-party source and retain their upstream copyright/license notices:
 
-- `backend/stalwart/mime.php`  
-  Source lineage: PEAR `Mail_Mime`  
+- `backend/stalwart/mime.php`
+  Source lineage: PEAR `Mail_Mime`
   License notice in file: BSD-style
-- `backend/stalwart/mimePart.php`  
-  Source lineage: PEAR `Mail_Mime` / `Mail_mimePart`  
+- `backend/stalwart/mimePart.php`
+  Source lineage: PEAR `Mail_Mime` / `Mail_mimePart`
   License notice in file: BSD-style
 
 Refer to the headers in each file for exact copyright and license terms.

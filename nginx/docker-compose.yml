@@ -3,6 +3,7 @@ services:
     build:
       context: ..
       dockerfile: nginx/Dockerfile
+      network: ${ZPUSH_BUILD_NETWORK:-default}
     image: ${ZPUSH_IMAGE:-local/zpush:latest}
     network_mode: host
     environment:

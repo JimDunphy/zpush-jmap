@@ -4,6 +4,12 @@ This runbook is for deploying `zpush-jmap` safely to production with repeatable 
 
 All operational commands use `nginx/manage.sh` (no direct `docker compose` usage required).
 
+For routine upgrades, follow [the release workflow](RELEASE_WORKFLOW.md): update
+root `VERSION`, build and verify on the development host, then manually run
+`--deploy`. Host/user/path settings stay in the ignored local `.env`.
+`--remote-version` reports the destination's running software without deploying.
+For a first host, follow [QUICK_START.md](QUICK_START.md).
+
 ## Goals
 
 - Keep existing mobile device sync state intact.
@@ -81,32 +87,30 @@ rg -n "ARG ZPUSH_VERSION|ARG ZPUSH_SHA256" nginx/Dockerfile
 Use this when `backend/stalwart` and/or `rust-lib` changed.
 
 1. Pull/copy updated source.
-2. Bump backend release identifier in `nginx/.env`:
-   - `STALWART_BACKEND_VERSION=<new-release-id>`
-3. Build and redeploy image.
-4. Verify runtime backend version and health.
+2. Bump the application release in root `VERSION` and select a new image tag.
+3. Build and verify locally using temporary test containers.
+4. Manually deploy to the configured SSH target when ready.
+5. Check the running release with `--remote-version`.
 
 Example (from repo root):
 
 ```bash
+vi VERSION
 cd nginx
-
-# bump release marker for audit/change tracking
-sed -ri "s/^STALWART_BACKEND_VERSION=.*/STALWART_BACKEND_VERSION=2026.03.01-backend1/" .env
-
-./manage.sh --set-image local/zpush:2026-03-01-backend1
+./manage.sh --set-image local/zpush:0.2.1
 ./manage.sh --build
-./manage.sh --up-no-build
-./manage.sh --backend-version
-./manage.sh --health
-./manage.sh --logs
+./manage.sh --verify-image
+./manage.sh --deploy --dry-run
+./manage.sh --deploy
+./manage.sh --remote-version
 ```
 
-Version source-of-truth:
-
-- `stalwart.php` reads/logs the version via `GetBackendVersion()`.
-- The value itself comes from `STALWART_BACKEND_VERSION` (in Docker: `nginx/.env` -> entrypoint injects into `backend/stalwart/config.php`).
-- For non-Docker/manual deployments, update `backend/stalwart/config.php` directly.
+The application version comes from root `VERSION`, embedded in the image as
+`STALWART_APPLICATION_VERSION`. `STALWART_BACKEND_VERSION` is a deployment/build
+identifier used in logs; the SSH deployment command derives it from the image
+tag. Image IDs and source hashes identify exact builds. Z-Push and PHP keep
+their own upstream/package versions. `--version` distinguishes local built and
+running software; it does not query the remote destination.
 
 
 ## Deployment Models

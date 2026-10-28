@@ -212,6 +212,8 @@ struct CalendarGetData {
 #[derive(Deserialize)]
 struct CalendarEventMetaGetData {
     id: String,
+    #[serde(rename = "@type")]
+    object_type: Option<String>,
     uid: Option<String>,
     #[serde(rename = "calendarIds", default)]
     calendar_ids: HashMap<String, bool>,
@@ -566,6 +568,8 @@ pub struct JmapCalendarEventMeta {
     #[prop]
     pub id: String,
     #[prop]
+    pub object_type: Option<String>,
+    #[prop]
     pub uid: Option<String>,
     #[prop]
     pub calendar_ids: Vec<String>,
@@ -627,6 +631,15 @@ pub struct JmapCalendarEventQueryResult {
     pub ids: Vec<String>,
     #[prop]
     pub total: i64,
+}
+
+// Preserve native task fields for lossless, property-level ActiveSync updates.
+#[php_class]
+pub struct JmapTask {
+    #[prop]
+    pub id: String,
+    #[prop]
+    pub data_json: String,
 }
 
 // ============================================================
@@ -3048,7 +3061,7 @@ impl JmapClient {
                 {
                     "accountId": &self.account_id,
                     "ids": ids,
-                    "properties": ["id", "uid", "calendarIds", "utcStart", "utcEnd"]
+                    "properties": ["id", "@type", "uid", "calendarIds", "utcStart", "utcEnd"]
                 },
                 "g0"
             ])])
@@ -3074,12 +3087,42 @@ impl JmapClient {
             .into_iter()
             .map(|e| JmapCalendarEventMeta {
                 id: e.id,
+                object_type: e.object_type,
                 uid: e.uid,
                 calendar_ids: mailbox_ids_to_vec(&e.calendar_ids),
                 utc_start: e.utc_start,
                 utc_end: e.utc_end,
             })
             .collect())
+    }
+
+    pub fn get_tasks(&self, ids: Vec<String>) -> PhpResult<Vec<JmapTask>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let resp = self.jmap_request(vec![json!([
+            "CalendarEvent/get", {
+                "accountId": &self.account_id, "ids": ids,
+                    "properties": ["id", "@type", "uid", "calendarIds", "title", "updated", "created",
+                    "description", "descriptionContentType", "start", "due", "timeZone",
+                    "showWithoutTime", "progress", "progressUpdated", "percentComplete",
+                    "priority", "privacy", "alerts", "keywords", "recurrenceRules",
+                    "excludedRecurrenceRules", "recurrenceOverrides", "participants"]
+            }, "tasks"
+        ])]).map_err(php_err)?;
+        if let Some(err) = check_jmap_error(&resp, "tasks") {
+            return Err(php_err(format!("Task read failed: {}", err)));
+        }
+        let payload = find_method_response(&resp, "CalendarEvent/get")
+            .ok_or_else(|| php_err("Missing task response"))?;
+        let list = payload.get("list").and_then(Value::as_array)
+            .ok_or_else(|| php_err("Missing task list"))?;
+        list.iter().filter(|v| v.get("@type").and_then(Value::as_str) == Some("Task"))
+            .map(|v| Ok(JmapTask {
+                id: v.get("id").and_then(Value::as_str)
+                    .ok_or_else(|| php_err("Missing task ID"))?.to_string(),
+                data_json: v.to_string(),
+            })).collect()
     }
 
     pub fn get_calendar_event(&self, id: String) -> PhpResult<JmapCalendarEvent> {
@@ -3203,6 +3246,11 @@ impl JmapClient {
             }
         }
 
+        if !payload.get("updated").and_then(Value::as_object)
+            .map_or(false, |updated| updated.contains_key(&id)) {
+            return Err(php_err("Calendar item update was not confirmed"));
+        }
+
         Ok(true)
     }
 
@@ -3221,7 +3269,15 @@ impl JmapClient {
         if let Some(err) = check_jmap_error(&resp, "s0") {
             return Err(php_err(format!("CalendarEvent/set error: {}", err)));
         }
-
+        let payload = find_method_response(&resp, "CalendarEvent/set")
+            .ok_or_else(|| php_err("Missing CalendarEvent/set response"))?;
+        if let Some(err) = payload.get("notDestroyed").and_then(|v| v.get(&id)) {
+            return Err(php_err(format!("Calendar item deletion failed: {}", err)));
+        }
+        if !payload.get("destroyed").and_then(Value::as_array)
+            .map_or(false, |items| items.iter().any(|item| item.as_str() == Some(&id))) {
+            return Err(php_err("Calendar item deletion was not confirmed"));
+        }
         Ok(true)
     }
 

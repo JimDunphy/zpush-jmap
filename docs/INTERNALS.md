@@ -121,13 +121,14 @@ Properties are NOT visible via `ReflectionClass::getProperties()` because ext-ph
 | `get_contact_state()` | `getContactState()` | String |
 | `get_contact_changes(since)` | `getContactChanges()` | JmapChanges |
 
-**Calendar (9 methods):**
+**Calendar and tasks:**
 
 | Rust method | PHP method | Returns |
 |---|---|---|
 | `get_calendars()` | `getCalendars()` | Vec\<JmapCalendar\> |
 | `query_calendar_events(cal, after, before, limit, pos)` | `queryCalendarEvents()` | JmapCalendarEventQueryResult |
 | `get_calendar_event_metadata(ids)` | `getCalendarEventMetadata()` | Vec\<JmapCalendarEventMeta\> |
+| `get_tasks(ids)` | `getTasks()` | Vec\<JmapTask\>, native Task objects only |
 | `get_calendar_event(id)` | `getCalendarEvent()` | JmapCalendarEvent |
 | `create_calendar_event(cal_id, json)` | `createCalendarEvent()` | String (new ID) |
 | `update_calendar_event(id, json)` | `updateCalendarEvent()` | bool |
@@ -135,7 +136,7 @@ Properties are NOT visible via `ReflectionClass::getProperties()` because ext-ph
 | `get_calendar_event_state()` | `getCalendarEventState()` | String |
 | `get_calendar_event_changes(since)` | `getCalendarEventChanges()` | JmapChanges |
 
-### 8 PHP-Facing Types
+### PHP-Facing Collaboration Types
 
 | Type | Key Fields |
 |---|---|
@@ -144,9 +145,10 @@ Properties are NOT visible via `ReflectionClass::getProperties()` because ext-ph
 | `JmapContact` | id, uid, first_name, last_name, middle_name, title, suffix, nickname, company, department, job_title, email1-3, work_phone, home_phone, mobile_phone, ..., birthday, anniversary, notes, has_photo, photo_blob_id (~45 fields) |
 | `JmapContactQueryResult` | ids, total |
 | `JmapCalendar` | id, name, is_default |
-| `JmapCalendarEventMeta` | id, calendar_ids, uid, utc_start, utc_end |
+| `JmapCalendarEventMeta` | id, object_type, calendar_ids, uid, utc_start, utc_end |
 | `JmapCalendarEvent` | id, uid, title, description, location, start, time_zone, utc_start, utc_end, duration, all_day, organizer_name/email, busy_status, sensitivity, reminder_minutes, attendees_json, recurrence_json, exceptions_json |
 | `JmapCalendarEventQueryResult` | ids, total |
+| `JmapTask` | id, data_json (native task fields used for mapping and content fingerprints) |
 
 ## Data Strategies
 
@@ -245,13 +247,39 @@ Methods that are email-only: `SendMail`, `MoveMessage`, `SetReadFlag`, `GetAttac
 
 ## Change Tracking (ChangesSink)
 
-Z-Push tracks three independent JMAP states and uses a Push-first `ChangesSink` strategy:
+Tasks are mapped by `backend/stalwart/tasks.php` and the Rust `getTasks()` method.
+Native `CalendarEvent` objects with `@type: Task` are exposed in `task-` folders;
+appointments stay in `cal-` folders. Task metadata uses a content fingerprint,
+and its independent change baseline wakes task folders without consuming the
+appointment view's notification. See [task behavior and limits](TASKS.md).
+
+`HasChangesSink()` advertises notification support to Z-Push. Without this override,
+the framework bypasses `ChangesSink()` and polls folder contents every 30 seconds.
+The backend tracks three independent JMAP states for monitored folder types:
 
 - `_emailState` — from `getEmailState()` / `getEmailChanges()`
 - `_contactState` — from `getContactState()` / `getContactChanges()`
 - `_calendarEventState` — from `getCalendarEventState()` / `getCalendarEventChanges()`
 
-`ChangesSink()` first waits on JMAP `eventSourceUrl` when `STALWART_PUSH_CHANGES_ENABLED=true` and push is available in the session. After a push notification it runs `/changes` checks once; on push errors it falls back to the existing 5-second polling loop. When any `/changes` call returns `has_changes=true`, only folders of that view type are marked as changed.
+`ChangesSinkInitialize()` captures the relevant type's state before the framework's
+initial folder comparison. `ChangesSink()` checks `/changes` before connecting to
+JMAP `eventSourceUrl` and after every wait, including timeout, EOF, or error. This
+catches changes between connections even if an SSE notification is missed. Push
+is enabled by `STALWART_PUSH_CHANGES_ENABLED`; unavailable push falls back to
+5-second polling. Waits use the interval supplied by Z-Push (normally 30 seconds).
+
+Changes notify all monitored folders of that type, covering arrivals, deletions,
+and moves. Z-Push then compares actual folder contents with the device's saved
+state and sends an ActiveSync Ping notification when a sync is needed. An expired
+JMAP state triggers another folder comparison; it does not reset ActiveSync state.
+An unavailable contact/calendar type is retried independently of mail.
+
+At INFO level, `ChangesSink(): JMAP push received` confirms an upstream event;
+`source=JMAP push changed folders=...` confirms a resulting folder notification.
+`source=push catch-up`, `push recovery`, or `poll` identifies fallback detection.
+At DEBUG level, `Waiting on JMAP event source` records each push wait. A completed
+Ping and subsequent Sync, followed by the device updating its view, complete the
+end-to-end check.
 
 ## ActiveSync Timezone Blob
 

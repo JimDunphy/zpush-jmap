@@ -26,9 +26,38 @@ cmd_init() {
 
 cmd_build() {
   ensure_env
+  local refresh=()
+  case "${1:-}" in
+    --refresh) refresh=(--pull --no-cache); shift ;;
+  esac
+  [[ $# -eq 0 ]] || die "Usage: $0 --build [--refresh]"
   info "Building image ${ZPUSH_IMAGE:-local/zpush:latest}"
   PROJECT_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
-  docker build -f "$ROOT_DIR/Dockerfile" -t "${ZPUSH_IMAGE:-local/zpush:latest}" "$PROJECT_ROOT"
+  local fingerprint
+  fingerprint=$(python3 "$ROOT_DIR/release.py" fingerprint)
+  local application_version
+  application_version=$(python3 "$ROOT_DIR/release.py" application-version)
+  docker build "${refresh[@]}" --label "io.zpush.source-sha256=$fingerprint" --label "org.opencontainers.image.version=$application_version" --network "${ZPUSH_BUILD_NETWORK:-default}" -f "$ROOT_DIR/Dockerfile" -t "${ZPUSH_IMAGE:-local/zpush:latest}" "$PROJECT_ROOT"
+}
+
+cmd_version() {
+  [[ ! -f "$ENV_FILE" ]] || ensure_env
+  python3 "$ROOT_DIR/release.py" version --image "${ZPUSH_IMAGE:-local/zpush:latest}"
+}
+
+cmd_remote_version() {
+  [[ ! -f "$ENV_FILE" ]] || ensure_env
+  python3 "$ROOT_DIR/release.py" remote-version "$@"
+}
+
+cmd_verify_image() {
+  ensure_env
+  python3 "$ROOT_DIR/release.py" verify --image "${1:-${ZPUSH_IMAGE:-local/zpush:latest}}"
+}
+
+cmd_deploy() {
+  ensure_env
+  python3 "$ROOT_DIR/release.py" deploy --image "${ZPUSH_IMAGE:-local/zpush:latest}" "$@"
 }
 
 cmd_console() {
@@ -191,7 +220,9 @@ Usage: $(basename "$0") <command> [args]
 
 Container Lifecycle & Data
   --init      Create .env and data dirs (config/state/log)
-  --build     Build container image using the Dockerfile
+  --build [--refresh]  Build image; --refresh pulls bases and reinstalls packages
+  --verify-image [image]  Test image locally and record source/image verification
+  --deploy [--dry-run]  Push verified source/image to ZPUSH_DEPLOY_SSH/ZPUSH_DEPLOY_DIR
   --up        docker compose up -d --build
   --up-no-build   docker compose up -d --no-build (deploy prebuilt image)
   --down      docker compose down
@@ -199,6 +230,8 @@ Container Lifecycle & Data
   --restart-no-build docker compose down && up -d --no-build
   --logs      Tail container logs
   --health    Check container /healthz
+  --version   Show checkout, built/running application, image, Z-Push and PHP versions
+  --remote-version [--host HOST --dir PATH]  Read versions from the configured SSH target
   --backend-version  Show configured and running STALWART_BACKEND_VERSION
   --zpush-version  Show pinned Dockerfile and running Z-Push versions
   --console   Open shell in container
@@ -217,6 +250,8 @@ main() {
     help|-h|--help|'') usage; exit 0;;
     --init|init) cmd_init "$@";;
     --build|build) cmd_build "$@";;
+    --verify-image|verify-image) cmd_verify_image "$@";;
+    --deploy|deploy) cmd_deploy "$@";;
     --console|console) cmd_console "$@";;
     --up|up) cmd_up "$@";;
     --up-no-build|up-no-build|--up-nobuild|up-nobuild) cmd_up_no_build "$@";;
@@ -225,6 +260,8 @@ main() {
     --restart-no-build|restart-no-build|--restart-nobuild|restart-nobuild) cmd_restart_no_build "$@";;
     --logs|logs) cmd_logs "$@";;
     --health|health) cmd_health "$@";;
+    --version|version) cmd_version "$@";;
+    --remote-version|remote-version) cmd_remote_version "$@";;
     --backend-version|backend-version) cmd_backend_version "$@";;
     --zpush-version|zpush-version) cmd_zpush_version "$@";;
     --backup|backup) cmd_backup "$@";;

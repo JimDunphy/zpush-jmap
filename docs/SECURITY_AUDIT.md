@@ -1,8 +1,13 @@
-# Security Audit: Z-Push Stalwart JMAP Backend (Current State)
+# Historical Security Remediation Review: Z-Push Stalwart JMAP Backend
 
-**Date:** 2026-02-22  
-**Status:** No open code-level findings from the active remediation set  
+**Date:** 2026-02-22
+**Status:** No open code-level findings from the active remediation set
 **Review mode:** Non-destructive code/config review
+
+This records the remediation set reviewed on the date above. It is not a new
+security audit of subsequent task and deployment changes. Current release
+verification and operational requirements are described in
+[RELEASE_WORKFLOW.md](RELEASE_WORKFLOW.md) and [HARDENING.md](HARDENING.md).
 
 ---
 

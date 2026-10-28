@@ -1,0 +1,9 @@
+.git
+rust-lib/target
+nginx/zpush
+**/.env
+**/.env.*
+**/.releases
+**/__pycache__
+docs-private
+rebuild.txt

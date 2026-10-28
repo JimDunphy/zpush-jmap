@@ -1,12 +1,22 @@
 # Z-Push Stalwart Backend
 
-ActiveSync support for [Stalwart Mail Server](https://stalw.art/) via JMAP. Enables iOS Mail, Android, Outlook, and other ActiveSync clients to sync email, contacts, and calendars with Stalwart.
+ActiveSync support for [Stalwart Mail Server](https://stalw.art/) via JMAP. Enables iOS Mail, Android, Outlook, and other ActiveSync clients to sync email, contacts, calendars, and tasks with Stalwart.
+
+The application release is defined in [VERSION](VERSION). Run
+`nginx/manage.sh --version` to compare the checkout, built image, and running
+application versions, including the image ID, Z-Push, and PHP-FPM package.
+The application version is independent of the upstream Z-Push framework version.
+Use `nginx/manage.sh --remote-version` to read the configured SSH deployment
+host's versions. Host/user/path settings belong in the ignored `nginx/.env`;
+published examples contain no deployment destination.
 
 ## Documentation
 
 - Executive overview: `docs/EXECUTIVE_SUMMARY.md`
 - Technical internals: `docs/INTERNALS.md`
 - Production deployment runbook: `docs/PRODUCTION_DEPLOYMENT.md`
+- Verify locally and deploy over SSH: `docs/RELEASE_WORKFLOW.md`
+- Task support and limitations: `docs/TASKS.md`
 - Security and operations hardening: `docs/HARDENING.md`
 - Security audit status: `docs/SECURITY_AUDIT.md`
 - Third-party licensing notes: `THIRD_PARTY_LICENSES.md`
@@ -16,7 +26,7 @@ ActiveSync support for [Stalwart Mail Server](https://stalw.art/) via JMAP. Enab
 | Capability | What you get |
 |-----------|--------------|
 | ActiveSync bridge for Stalwart | Native iOS/Android/Outlook Exchange-account connectivity over JMAP backend |
-| Mail + Contacts + Calendar sync | One backend for the core mobile collaboration set |
+| Mail + Contacts + Calendar + Tasks sync | Tasks appear in separate Exchange task lists backed by Stalwart calendars |
 | Push-assisted change detection | JMAP push (`eventSourceUrl`) with polling fallback for resilient device updates |
 | Autodiscover endpoint | `/autodiscover/Autodiscover.xml` support for compatible clients |
 | Security-first network model | TLS at front-end Nginx, host-firewall-controlled backend listener, explicit lab-only relaxations |
@@ -38,7 +48,8 @@ ActiveSync support for [Stalwart Mail Server](https://stalw.art/) via JMAP. Enab
 |------|--------------------------------|-------------------|
 | Full Zimbra suite parity | Not a full drop-in replacement for every Zimbra Network module and workflow | Position as modular migration path: Stalwart + `zpush-jmap` + Project Z-Bridge |
 | Device management depth | ABQ allow/block/quarantine rules are available, but no full enterprise MDM console in this repo | Use ABQ policy + existing firewall/VPN controls; integrate external MDM where required |
-| ActiveSync scope | Focused on mail, contacts, and calendars (core mobile workload) | Keep scope narrow for reliability; pair with web workflows via Project Z-Bridge |
+| Task editing scope | Ordinary tasks support create, edit, completion, moves, deletion, and push; recurring and assigned task edits return failure | Use a capable calendar/task client for advanced task workflows; see `docs/TASKS.md` |
+| iOS Mail deletion display | In the iOS 26.6.2 rehearsal, externally deleted messages remained visible after Mail acknowledged the ActiveSync deletion; arrival push worked | Pull down to refresh the Inbox. Root cause remains unresolved; disabling threading did not resolve it |
 | Built-in HA orchestration | Multi-host is supported architecturally, but orchestration/operations are operator-managed | Follow shared-state + DNS/LB guidance in docs for scale-out deployments |
 | Turnkey migration tooling | Automated migration/assessment tooling is outside this repository | Use staged pilot migrations and documented rollback/image promotion process |
 | Commercial support model | Open-source project; no bundled enterprise support SLA from this repo | Use internal ops ownership or partner support model where needed |
@@ -117,6 +128,9 @@ Z-Push translates the ActiveSync protocol into internal calls. The `BackendStalw
 
 ## Quick Start
 
+For a first installation with host Nginx serving HTTPS and a prebuilt container
+image, follow the [first-host quick start](docs/QUICK_START.md).
+
 ```bash
 # 1. Clone the repository
 git clone <repository-url>
@@ -168,7 +182,7 @@ Lab-only relaxations (not for production):
 2. **Server:** your-domain.com (the host proxying to port 10000)
 3. **Username:** your full email address (e.g., `user@example.com`)
 4. **Password:** your Stalwart password
-5. **Enable:** Mail, Contacts, Calendar as desired
+5. **Enable:** Mail, Contacts, Calendar, and Reminders as desired. Task lists appear in Reminders; see [task support and limits](docs/TASKS.md).
 
 The container also serves `/autodiscover/Autodiscover.xml` for clients that support it.
 
@@ -183,7 +197,9 @@ All commands are run from the `nginx/` directory:
 | Command | Description |
 |---------|-------------|
 | `--init` | Create `.env` from template and initialize data directories |
-| `--build` | Build the Docker image (compiles Rust, installs PHP/Nginx/Z-Push) |
+| `--build [--refresh]` | Build the image; `--refresh` pulls bases and repeats package installation |
+| `--verify-image [image]` | Test a candidate image in temporary local containers and record source/image hashes |
+| `--deploy [--dry-run]` | Explicitly deploy the verified release to the configured SSH host, with backup and rollback |
 | `--up` | Build image (if needed) and start the container |
 | `--up-no-build` | Start/recreate container using existing image tag (no rebuild) |
 | `--down` | Stop and remove the container |
@@ -191,6 +207,8 @@ All commands are run from the `nginx/` directory:
 | `--restart-no-build` | Stop and start using existing image (`down -> up --no-build`) |
 | `--logs` | Tail container logs (last 200 lines) |
 | `--health` | Check the `/healthz` endpoint |
+| `--version` | Report the current Docker host's checkout, built image, and running versions |
+| `--remote-version [--host HOST --dir PATH]` | Read running versions from the configured SSH destination |
 | `--backend-version` | Show configured and running `STALWART_BACKEND_VERSION` |
 | `--zpush-version` | Show pinned Dockerfile and running Z-Push versions |
 | `--console` | Open a bash shell inside the running container |
@@ -200,19 +218,31 @@ All commands are run from the `nginx/` directory:
 | `--export-image <file.tar.gz>` | Export current image to tar/tar.gz |
 | `--import-image <file.tar.gz>` | Import image tar/tar.gz on target host |
 
-### Backend Version Tracking
+### Application and Deployment Version Tracking
 
-Set `STALWART_BACKEND_VERSION` in `nginx/.env` for each release (for example `2026.02.23-rc1` or a git tag).
+The root `VERSION` file defines the application release. Update it for the next
+release, select a new image tag, build, and verify locally. Verification starts
+temporary containers and removes them after the checks; it does not upgrade a
+long-running local service. You then explicitly deploy when ready.
+
+`STALWART_BACKEND_VERSION` is a separate deployment/build identifier. The SSH
+deployment command updates it from the selected image tag. It does not override
+the embedded application version. Exact builds are identified by immutable
+image IDs and source hashes.
 
 Check what is configured and what is currently running:
 
 ```bash
 cd nginx
+./manage.sh --version
+./manage.sh --remote-version
 ./manage.sh --backend-version
 ./manage.sh --zpush-version
 ```
 
 Z-Push is pinned by default (not auto-latest). The image build uses `nginx/Dockerfile` `ARG ZPUSH_VERSION` + `ARG ZPUSH_SHA256` until you intentionally update them.
+See [the release workflow](docs/RELEASE_WORKFLOW.md) for build, verification,
+manual deployment, private target configuration, and rollback.
 
 ## Configuration
 
@@ -223,6 +253,7 @@ The `.env` file in `nginx/` controls both the container and the Stalwart backend
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZPUSH_IMAGE` | `local/zpush:latest` | Docker image name |
+| `ZPUSH_BUILD_NETWORK` | `default` | Network for Docker build steps; use `host` when bridge networking is unavailable. Runtime networking remains host mode. |
 | `ZPUSH_BIND_ADDRESS` | `127.0.0.1` | Listener address inside host network namespace (`127.0.0.1` for production reverse-proxy use; `0.0.0.0` for lab testing) |
 | `ZPUSH_HTTP_PORT` | `10000` | Host port the container listens on |
 | `STALWART_URL` | `http://localhost:10080` | Stalwart JMAP endpoint (no trailing slash) |
@@ -362,6 +393,29 @@ For debugging (`./manage.sh --console`), here's what's inside the container:
 Back up persistent data with: `./manage.sh --backup`
 
 ## Running Tests
+
+For a release image built with `nginx/manage.sh --build`, run
+`nginx/manage.sh --verify-image`. This runs the isolated mail, push, task,
+compiled transport, deployment rollback, and fresh-start checks and records
+the result for the explicit deployment command. See
+[the release workflow](docs/RELEASE_WORKFLOW.md).
+
+Run the backend regression tests without accessing a live mailbox (from the
+project root, using your built image tag):
+
+```bash
+docker run --rm --network none --entrypoint php -v "$PWD:/workspace:ro" \
+  local/zpush:latest /workspace/tests/test_backend_sync.php
+docker run --rm --network none --entrypoint php -v "$PWD:/workspace:ro" \
+  local/zpush:latest /workspace/tests/test_backend_push.php
+python3 tests/test_push_transport.py --image local/zpush:latest
+```
+
+The push tests cover sink registration, arrival/deletion notifications, moves,
+initialization gaps, missed events, disconnects, expired tokens, and independent
+calendar failures. The Python test runs the compiled Rust extension against a
+loopback HTTP/SSE fixture with dummy credentials; it requires Docker host
+networking on Linux.
 
 An integration test suite exercises every Rust FFI method against a live Stalwart server:
 
@@ -668,13 +722,16 @@ For single-host deployments, none of this is needed — the local `nginx/zpush/`
 
 ```
 zpush-jmap/
+  VERSION           ← Application release number
+  docs/             ← Quick start, internals, task limits, and release runbooks
   backend/stalwart/
-    stalwart.php     ← PHP backend (1,838 lines) — Z-Push ↔ Rust adapter
+    stalwart.php     ← PHP backend — Z-Push ↔ Rust adapter
+    tasks.php        ← ActiveSync task mapping and native task operations
     config.php       ← Backend configuration
     mime.php         ← MIME library (from PEAR Mail_Mime)
     mimePart.php     ← MIME part library
   rust-lib/
-    src/lib.rs       ← Rust FFI layer (2,728 lines) — all JMAP protocol work
+    src/lib.rs       ← Rust FFI layer — all JMAP protocol work
     Cargo.toml       ← Rust dependencies
   nginx/
     Dockerfile       ← Multi-stage build: compiles Rust, then assembles Debian/PHP/Nginx
@@ -682,10 +739,14 @@ zpush-jmap/
     entrypoint.sh    ← Container initialization
     nginx-zpush.conf ← Nginx routing config
     manage.sh        ← Container lifecycle management
+    release.py       ← Version reporting, local verification, and explicit SSH deployment
     env.example      ← Environment variable template
   tests/
-    test_jmap.php    ← Integration test suite (24 tests)
-    run_tests.sh     ← Test runner (Docker-based)
+    test_jmap.php           ← Optional live JMAP integration suite
+    test_backend_*.php      ← Isolated mail, push, and task/WBXML regressions
+    test_*_transport.py     ← Compiled Rust/PHP tests with local HTTP fixtures
+    test_release.py         ← Verification gates, remote reporting, and rollback checks
+    run_tests.sh            ← Live integration runner (Docker-based)
 ```
 
 ## License

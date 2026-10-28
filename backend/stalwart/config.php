@@ -18,9 +18,12 @@
     // STALWART_URL environment variable. Uncomment to set manually:
 //  define('STALWART_URL', 'http://localhost:10080');
 
-    // Backend release identifier for change tracking and runtime diagnostics.
-    // Update this value for each release when deploying manually (non-Docker).
-    define('STALWART_BACKEND_VERSION', 'dev');
+    // Application version comes from the root VERSION file, copied beside this
+    // configuration in an image. A build/deployment label can identify a rebuild.
+    $applicationVersionFile = __DIR__ . '/VERSION';
+    if (!is_file($applicationVersionFile)) $applicationVersionFile = dirname(__DIR__, 2) . '/VERSION';
+    define('STALWART_APPLICATION_VERSION', is_file($applicationVersionFile) ? trim(file_get_contents($applicationVersionFile)) : 'unknown');
+    define('STALWART_BACKEND_VERSION', STALWART_APPLICATION_VERSION);
 
     // SSL certificate verification settings
     // Keep both true for production. Set to false only for controlled lab testing.

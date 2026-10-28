@@ -1,7 +1,7 @@
 # Executive Summary
 
-Date: February 6, 2026  
-Project: `zpush-jmap`  
+Date: February 6, 2026
+Project: `zpush-jmap`
 Audience: CTO, CSO, Operations, and business leadership
 
 ## What This Project Is
@@ -13,6 +13,15 @@ In practical terms:
 - Stalwart remains the core mail platform (JMAP/IMAP/SMTP).
 - `zpush-jmap` provides ActiveSync compatibility for clients that do not yet support JMAP natively.
 - NGINX at the edge terminates TLS on `443` and proxies ActiveSync requests internally.
+
+The current implementation covers mail, contacts, appointments, and ordinary
+tasks. Task support includes completion, reminders, and list moves; recurring
+and assigned task edits remain outside the initial task implementation. See
+[task support](TASKS.md) for the exact boundaries.
+
+Releases use a root VERSION file, isolated local image verification, and an
+explicit manual SSH deployment step with backup and rollback. Deployment targets
+remain in private local configuration. See [the release workflow](RELEASE_WORKFLOW.md).
 
 ## Why We Built It
 
@@ -54,5 +63,5 @@ Security outcome depends on deployment discipline:
 
 ## Strategic Outlook
 
-`zpush-jmap` is an interoperability layer, not a long-term replacement for native JMAP client support.  
+`zpush-jmap` is an interoperability layer, not a long-term replacement for native JMAP client support.
 As mobile ecosystems improve JMAP support, organizations can reduce dependency on ActiveSync while retaining the same Stalwart backend.

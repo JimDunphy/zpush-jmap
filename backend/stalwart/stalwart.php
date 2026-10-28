@@ -20,9 +20,11 @@ require_once('backend/stalwart/config.php');
 include_once('lib/default/diffbackend/diffbackend.php');
 include_once('lib/default/backend.php');
 require_once('backend/stalwart/mime.php');
+require_once(__DIR__ . '/tasks.php');
 
 
 class BackendStalwart extends BackendDiff {
+    use StalwartTasks;
 
     private $mainUser;
     protected $_user;
@@ -44,6 +46,7 @@ class BackendStalwart extends BackendDiff {
     protected $_mailboxState = null;
     protected $_contactState = null;
     protected $_calendarEventState = null;
+    protected $_taskState = null;
 
     // ChangesSink
     public $changesSink = false;
@@ -51,6 +54,13 @@ class BackendStalwart extends BackendDiff {
 
     private const QUERY_PAGE_SIZE = 10000;
     private const QUERY_MAX_IDS = 50000;
+
+    private const CHANGES_SINK_TYPES = array(
+        'message' => array('_emailState', 'getEmailState', 'getEmailChanges'),
+        'contact' => array('_contactState', 'getContactState', 'getContactChanges'),
+        'appointment' => array('_calendarEventState', 'getCalendarEventState', 'getCalendarEventChanges'),
+        'task' => array('_taskState', 'getCalendarEventState', 'getCalendarEventChanges'),
+    );
 
 
     /**
@@ -401,44 +411,53 @@ class BackendStalwart extends BackendDiff {
         throw new AuthenticationRequiredException('Access denied by device policy.');
     }
 
-    private function AddChangedFoldersByView($view, &$changedFolders) {
+    private function GetChangesSinkFoldersByView() {
+        $folders = array();
         foreach ($this->changesSinkFolders as $fid) {
             $index = $this->GetFolderIndex($fid);
             if ($index === false || !isset($this->_folders[$index])) {
                 continue;
             }
-            if ($this->_folders[$index]->view == $view) {
-                $changedFolders[] = $fid;
+            $view = $this->_folders[$index]->view;
+            if (isset(self::CHANGES_SINK_TYPES[$view])) {
+                $folders[$view][] = $fid;
             }
         }
+        return $folders;
     }
 
     private function CollectChangedFoldersOnce() {
-        $hasChanges = false;
         $changedFolders = array();
-
-        $emailChanges = $this->_jmapClient->getEmailChanges($this->_emailState);
-        if ($emailChanges->has_changes) {
-            $hasChanges = true;
-            $this->AddChangedFoldersByView('message', $changedFolders);
+        foreach ($this->GetChangesSinkFoldersByView() as $view => $folders) {
+            list($property, $getState, $getChanges) = self::CHANGES_SINK_TYPES[$view];
+            try {
+                if ($this->$property === null) {
+                    // Recovery after an unavailable initial state: recheck the
+                    // actual folder contents so changes in the gap aren't lost.
+                    $this->$property = $this->_jmapClient->$getState();
+                    $changedFolders = array_merge($changedFolders, $folders);
+                } else {
+                    $changes = $this->_jmapClient->$getChanges($this->$property);
+                    if ($changes->has_changes) {
+                        $changedFolders = array_merge($changedFolders, $folders);
+                    }
+                    $this->$property = $changes->new_state;
+                }
+            } catch (Exception $e) {
+                ZLog::Write(LOGLEVEL_WARN, 'Stalwart->ChangesSink(): ' . $view . ' changes unavailable: ' . $e->getMessage());
+                $this->$property = null;
+                try {
+                    // An expired /changes token must trigger a folder diff,
+                    // without resetting the device's ActiveSync state.
+                    $this->$property = $this->_jmapClient->$getState();
+                    $changedFolders = array_merge($changedFolders, $folders);
+                } catch (Exception $stateError) {
+                    // Keep retrying this type. An unavailable calendar or
+                    // address book must not discard changes already found in mail.
+                }
+            }
         }
-        $this->_emailState = $emailChanges->new_state;
-
-        $contactChanges = $this->_jmapClient->getContactChanges($this->_contactState);
-        if ($contactChanges->has_changes) {
-            $hasChanges = true;
-            $this->AddChangedFoldersByView('contact', $changedFolders);
-        }
-        $this->_contactState = $contactChanges->new_state;
-
-        $calChanges = $this->_jmapClient->getCalendarEventChanges($this->_calendarEventState);
-        if ($calChanges->has_changes) {
-            $hasChanges = true;
-            $this->AddChangedFoldersByView('appointment', $changedFolders);
-        }
-        $this->_calendarEventState = $calChanges->new_state;
-
-        return array($hasChanges, array_values(array_unique($changedFolders)));
+        return array_values(array_unique($changedFolders));
     }
 
 
@@ -548,6 +567,12 @@ class BackendStalwart extends BackendDiff {
             $folder->primary = 0;
             $folder->totalEmails = $mb->total_emails;
             $folder->unreadEmails = $mb->unread_emails;
+            if ($mb->role === 'inbox' || $mb->role === 'trash') {
+                ZLog::Write(LOGLEVEL_DEBUG, sprintf(
+                    'Stalwart->Setup(): mailbox=%s role=%s total=%d unread=%d',
+                    $mb->id, $mb->role, $mb->total_emails, $mb->unread_emails
+                ));
+            }
 
             // Map JMAP roles to folder properties
             switch ($mb->role) {
@@ -622,6 +647,26 @@ class BackendStalwart extends BackendDiff {
             ZLog::Write(LOGLEVEL_WARN, 'Stalwart->Setup(): getCalendars failed: ' . $e->getMessage());
         }
 
+        // Stalwart stores Events and Tasks in the same calendar collection.
+        // ActiveSync requires separate folder types, with stable independent IDs.
+        $taskCalendars = array_values(array_filter($this->_folders, function ($folder) { return $folder->view === 'appointment'; }));
+        // Calendar/get does not always expose isDefault. Choose a deterministic
+        // fallback so Exchange clients still receive exactly one default Tasks list.
+        usort($taskCalendars, function ($a, $b) {
+            $rank = function ($c) { return $c->primary ? 0 : (strcasecmp($c->name, 'Calendar') === 0 ? 1 : 2); };
+            return ($rank($a) <=> $rank($b)) ?: strcmp($a->jmapId, $b->jmapId);
+        });
+        foreach ($taskCalendars as $number => $calendar) {
+            if ($calendar->view !== 'appointment') continue;
+            $folder = clone $calendar;
+            $folder->id = $folder->devid = 'task-' . $calendar->jmapId;
+            $folder->view = 'task';
+            $folder->primary = $number === 0 ? 1 : 0;
+            $folder->name = $folder->primary ? 'Tasks' : $calendar->name . ' Tasks';
+            $this->_idToIndex[$folder->devid] = count($this->_folders);
+            $this->_folders[] = $folder;
+        }
+
         ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->Setup(): Loaded ' . count($this->_folders) . ' folders (mail+contacts+calendar)');
         return true;
     }
@@ -673,6 +718,9 @@ class BackendStalwart extends BackendDiff {
             $folder->type = ($this->_folders[$index]->primary == 1)
                 ? SYNC_FOLDER_TYPE_APPOINTMENT
                 : SYNC_FOLDER_TYPE_USER_APPOINTMENT;
+        } elseif ($view == 'task') {
+            $folder->type = ($this->_folders[$index]->primary == 1)
+                ? SYNC_FOLDER_TYPE_TASK : SYNC_FOLDER_TYPE_USER_TASK;
         } else {
             // Mail folders - dispatch by role
             switch ($role) {
@@ -727,6 +775,11 @@ class BackendStalwart extends BackendDiff {
      * Returns the internal folder index for a given device ID.
      */
     public function GetFolderIndex($devid) {
+        // ItemOperations/Fetch can run immediately after Logon(), without the
+        // Setup() call made by Sync. Resolve folders in this request as needed.
+        if (empty($this->_folders) && !$this->Setup($this->_user)) {
+            throw new StatusException('Unable to load Stalwart folders', SYNC_STATUS_SERVERERROR);
+        }
         if (isset($this->_idToIndex[$devid])) {
             return $this->_idToIndex[$devid];
         }
@@ -756,7 +809,7 @@ class BackendStalwart extends BackendDiff {
         ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->GetMessageList(): folder=' . $folderid . ' cutoff=' . $cutoffdate);
 
         if (!$this->_jmapClient) {
-            return array();
+            throw new StatusException('Stalwart is not connected', SYNC_STATUS_SERVERERROR);
         }
 
         $index = $this->GetFolderIndex($folderid);
@@ -768,12 +821,16 @@ class BackendStalwart extends BackendDiff {
                     return $this->GetContactMessageList($folderid, $index);
                 case 'appointment':
                     return $this->GetAppointmentMessageList($folderid, $index, $cutoffdate);
+                case 'task':
+                    return $this->GetTaskMessageList($index);
                 default:
                     return $this->GetEmailMessageList($folderid, $cutoffdate);
             }
         } catch (Exception $e) {
             ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->GetMessageList(): Error: ' . $e->getMessage());
-            return array();
+            // An empty array means every previously synced item was deleted.
+            // Keep the device's existing contents when the upstream request fails.
+            throw new StatusException('Unable to list Stalwart messages', SYNC_STATUS_SERVERERROR);
         }
     }
 
@@ -943,6 +1000,7 @@ class BackendStalwart extends BackendDiff {
             $metas = $this->_jmapClient->getCalendarEventMetadata($batch);
 
             foreach ($metas as $meta) {
+                if ($meta->object_type === 'Task') continue;
                 $msg = array();
                 $msg['id'] = $meta->id;
                 $msg['flags'] = 1;
@@ -970,6 +1028,8 @@ class BackendStalwart extends BackendDiff {
                     return $this->StatContactMessage($id);
                 case 'appointment':
                     return $this->StatAppointmentMessage($id);
+                case 'task':
+                    return $this->TaskStat($this->ReadTask($folderid, $id));
                 default:
                     return $this->StatEmailMessage($id);
             }
@@ -1015,6 +1075,7 @@ class BackendStalwart extends BackendDiff {
         }
 
         $meta = $metas[0];
+        if ($meta->object_type === 'Task') return false;
         $stat = array();
         $stat['id'] = $meta->id;
         $stat['flags'] = 1;
@@ -1038,6 +1099,8 @@ class BackendStalwart extends BackendDiff {
                     return $this->GetContactMessage($id, $contentparameters);
                 case 'appointment':
                     return $this->GetAppointmentMessage($id, $contentparameters);
+                case 'task':
+                    return $this->GetTaskMessage($folderid, $id, $contentparameters);
                 default:
                     return $this->GetEmailMessage($folderid, $id, $contentparameters);
             }
@@ -1045,6 +1108,30 @@ class BackendStalwart extends BackendDiff {
             ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->GetMessage(): Error: ' . $e->getMessage());
             return false;
         }
+    }
+
+    /**
+     * Sync/Fetch requests the complete item previously sent as a preview.
+     * ItemOperations/Fetch carries its own body-size preferences.
+     */
+    public function Fetch($folderid, $id, $contentparameters) {
+        $fetchParameters = clone $contentparameters;
+        if (Request::GetCommandCode() === ZPush::COMMAND_SYNC) {
+            $preferences = array();
+            foreach (($contentparameters->GetBodyPreference() ?: array()) as $type) {
+                $preference = clone $contentparameters->BodyPreference($type);
+                $preference->SetTruncationSize(false);
+                $preferences[$type] = $preference;
+            }
+            // Clone nested preferences too, preserving the collection's preview
+            // limit for subsequent synchronization responses in this request.
+            $fetchParameters->SetBodypref($preferences);
+        }
+        ZLog::Write(LOGLEVEL_DEBUG, sprintf(
+            'Stalwart->Fetch(): command=%s folder=%s id=%s',
+            Request::GetCommand(), $folderid, $id
+        ));
+        return parent::Fetch($folderid, $id, $fetchParameters);
     }
 
     private function GetEmailMessage($folderid, $id, $contentparameters) {
@@ -1106,28 +1193,33 @@ class BackendStalwart extends BackendDiff {
             // AS 12+ - use SyncBaseBody
             $output->asbody = new SyncBaseBody();
 
-            if (isset($bodyPrefArray[4])) {
+            // GetBodyPreference() returns type IDs, not BodyPreference objects.
+            if (in_array(4, $bodyPrefArray)) {
                 // MIME body requested - download raw message
                 $output->asbody->type = 4;
                 $tmpFile = tempnam(sys_get_temp_dir(), 'zpush_mime_');
+                if ($tmpFile === false) {
+                    throw new RuntimeException('Unable to create MIME download file');
+                }
                 try {
                     $size = $this->_jmapClient->downloadBlobToFile($email->blob_id, $tmpFile);
-                    $output->asbody->data = file_get_contents($tmpFile);
+                    $output->asbody->data = fopen($tmpFile, 'rb');
+                    if ($output->asbody->data === false) {
+                        throw new RuntimeException('Unable to open downloaded MIME body');
+                    }
                     $output->asbody->estimatedDataSize = $size;
-                } catch (Exception $e) {
-                    ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->GetEmailMessage(): MIME download error: ' . $e->getMessage());
-                    $output->asbody->data = '';
-                    $output->asbody->estimatedDataSize = 0;
+                } finally {
+                    // The open stream remains readable after unlink on Linux.
+                    if (file_exists($tmpFile)) unlink($tmpFile);
                 }
-                if (file_exists($tmpFile)) unlink($tmpFile);
                 $output->asbody->truncated = 0;
-            } elseif (isset($bodyPrefArray[2]) && $html !== null) {
+            } elseif (in_array(2, $bodyPrefArray) && $html !== null) {
                 // HTML body
                 $output->asbody->type = 2;
                 $output->asbody->estimatedDataSize = strlen($html);
 
-                $truncSize = isset($bodyPrefArray[2]) ? $bodyPrefArray[2]->TruncationSize : false;
-                if ($truncSize && strlen($html) > $truncSize) {
+                $truncSize = $contentparameters->BodyPreference(2)->GetTruncationSize();
+                if ($truncSize !== false && strlen($html) > $truncSize) {
                     $html = Utils::Utf8_truncate($html, $truncSize);
                     $output->asbody->truncated = 1;
                 } else {
@@ -1141,8 +1233,8 @@ class BackendStalwart extends BackendDiff {
                 $text = ($plain !== null) ? $plain : '';
                 $output->asbody->estimatedDataSize = strlen($text);
 
-                $truncSize = isset($bodyPrefArray[1]) ? $bodyPrefArray[1]->TruncationSize : false;
-                if ($truncSize && strlen($text) > $truncSize) {
+                $truncSize = $contentparameters->BodyPreference(1)->GetTruncationSize();
+                if ($truncSize !== false && strlen($text) > $truncSize) {
                     $text = Utils::Utf8_truncate($text, $truncSize);
                     $output->asbody->truncated = 1;
                 } else {
@@ -1152,9 +1244,9 @@ class BackendStalwart extends BackendDiff {
                 $output->asbody->data = StringStreamWrapper::Open($text);
             }
 
-            // Preview (first 255 chars of plain text)
-            if ($plain !== null && strlen($plain) > 0) {
-                $output->asbody->preview = substr($plain, 0, 255);
+            $previewSize = $contentparameters->BodyPreference($output->asbody->type)->GetPreview();
+            if (Request::GetProtocolVersion() >= 14.0 && $previewSize && $plain !== null) {
+                $output->asbody->preview = Utils::Utf8_truncate($plain, $previewSize);
             }
         }
 
@@ -1206,7 +1298,7 @@ class BackendStalwart extends BackendDiff {
         if ($contact->last_name != '') $output->lastname = $contact->last_name;
         if ($contact->middle_name != '') $output->middlename = $contact->middle_name;
         if ($contact->suffix != '') $output->suffix = $contact->suffix;
-        if ($contact->title != '') $output->title = $contact->title;
+        if ($contact->name_title != '') $output->title = $contact->name_title;
         if ($contact->nickname != '') $output->nickname = $contact->nickname;
 
         // File-as (display name)
@@ -1224,7 +1316,6 @@ class BackendStalwart extends BackendDiff {
         if ($contact->company != '') $output->companyname = $contact->company;
         if ($contact->department != '') $output->department = $contact->department;
         if ($contact->job_title != '') $output->jobtitle = $contact->job_title;
-        if ($contact->assistant_name != '') $output->assistantname = $contact->assistant_name;
         if ($contact->spouse != '') $output->spouse = $contact->spouse;
 
         // Email
@@ -1314,6 +1405,7 @@ class BackendStalwart extends BackendDiff {
     }
 
     private function GetAppointmentMessage($id, $contentparameters) {
+        if ($this->StatAppointmentMessage($id) === false) throw new RuntimeException('Item is not an appointment');
         $event = $this->_jmapClient->getCalendarEvent($id);
 
         $output = new SyncAppointment();
@@ -1639,6 +1731,8 @@ class BackendStalwart extends BackendDiff {
                     return $this->ChangeContactMessage($folderid, $id, $input, $index);
                 case 'appointment':
                     return $this->ChangeAppointmentMessage($folderid, $id, $input, $index);
+                case 'task':
+                    return $this->ChangeTaskMessage($folderid, $id, $input, $index);
                 default:
                     return $this->ChangeEmailMessage($folderid, $id, $input);
             }
@@ -1686,6 +1780,7 @@ class BackendStalwart extends BackendDiff {
     }
 
     private function ChangeAppointmentMessage($folderid, $id, $input, $index) {
+        if (!empty($id) && $this->StatAppointmentMessage($id) === false) return false;
         $data = $this->BuildCalendarEventJson($input);
         $jmapId = $this->_folders[$index]->jmapId;
 
@@ -2075,6 +2170,16 @@ class BackendStalwart extends BackendDiff {
         ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->MoveMessage(): ' . $id . ' from ' . $folderid . ' to ' . $newfolderid);
 
         try {
+            $source = $this->_folders[$this->GetFolderIndex($folderid)];
+            $target = $this->_folders[$this->GetFolderIndex($newfolderid)];
+            if ($source->view === 'task' || $target->view === 'task') {
+                if ($source->view !== 'task' || $target->view !== 'task') return false;
+                $this->ReadTask($folderid, $id);
+                $patch = array('calendarIds/' . str_replace(array('~', '/'), array('~0', '~1'), $source->jmapId) => null,
+                    'calendarIds/' . str_replace(array('~', '/'), array('~0', '~1'), $target->jmapId) => true);
+                if ($source->jmapId !== $target->jmapId) $this->_jmapClient->updateCalendarEvent($id, json_encode($patch, JSON_THROW_ON_ERROR));
+                return $id;
+            }
             $this->_jmapClient->moveEmail($id, $folderid, $newfolderid);
             return $id;
         } catch (Exception $e) {
@@ -2099,8 +2204,11 @@ class BackendStalwart extends BackendDiff {
                     $this->_jmapClient->destroyContact($id);
                     return true;
                 case 'appointment':
+                    if ($this->StatAppointmentMessage($id) === false) return false;
                     $this->_jmapClient->destroyCalendarEvent($id);
                     return true;
+                case 'task':
+                    return $this->DeleteTaskMessage($folderid, $id);
                 default:
                     $deletesAsMoves = defined('STALWART_DELETESASMOVES') ? STALWART_DELETESASMOVES : true;
                     if ($deletesAsMoves && $this->_wasteID && $folderid != $this->_wasteID) {
@@ -2180,13 +2288,28 @@ class BackendStalwart extends BackendDiff {
     }
 
 
-    /**
-     * Initializes the ChangesSink for a folder.
-     */
+    /** Advertise the sink to Z-Push; the base implementation returns false. */
+    public function HasChangesSink() {
+        return true;
+    }
+
+    /** Initialize change tokens before Z-Push performs its initial folder diff. */
     public function ChangesSinkInitialize($folderid) {
         ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->ChangesSinkInitialize(): folder=' . $folderid);
+        $index = $this->GetFolderIndex($folderid);
+        if ($index === false || !isset(self::CHANGES_SINK_TYPES[$this->_folders[$index]->view])) {
+            return false;
+        }
         $this->changesSink = true;
         $this->changesSinkFolders[$folderid] = $folderid;
+        list($property, $getState) = self::CHANGES_SINK_TYPES[$this->_folders[$index]->view];
+        if ($this->$property === null) {
+            try {
+                $this->$property = $this->_jmapClient->$getState();
+            } catch (Exception $e) {
+                ZLog::Write(LOGLEVEL_WARN, 'Stalwart->ChangesSinkInitialize(): State unavailable; will retry: ' . $e->getMessage());
+            }
+        }
         return true;
     }
 
@@ -2198,31 +2321,16 @@ class BackendStalwart extends BackendDiff {
     public function ChangesSink($timeout = 30) {
         ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->ChangesSink(): timeout=' . $timeout);
 
-        $endTime = time() + $timeout;
-
-        // Get initial states if not set
-        try {
-            if ($this->_emailState === null) {
-                $this->_emailState = $this->_jmapClient->getEmailState();
-            }
-            if ($this->_contactState === null) {
-                $this->_contactState = $this->_jmapClient->getContactState();
-            }
-            if ($this->_calendarEventState === null) {
-                $this->_calendarEventState = $this->_jmapClient->getCalendarEventState();
-            }
-        } catch (Exception $e) {
-            ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->ChangesSink(): Initial state error: ' . $e->getMessage());
-            sleep(5);
-            return array();
-        }
+        $endTime = microtime(true) + max(0, $timeout);
 
         $pushEnabled = defined('STALWART_PUSH_CHANGES_ENABLED')
             ? $this->ParseBoolOption(STALWART_PUSH_CHANGES_ENABLED, true)
             : true;
         $pushSupported = false;
 
-        if ($pushEnabled && method_exists($this->_jmapClient, 'supportsPushNotifications')) {
+        if ($pushEnabled && $this->_jmapClient !== null
+            && method_exists($this->_jmapClient, 'supportsPushNotifications')
+            && method_exists($this->_jmapClient, 'waitForPushChange')) {
             try {
                 $pushSupported = $this->_jmapClient->supportsPushNotifications();
             } catch (Exception $e) {
@@ -2230,52 +2338,53 @@ class BackendStalwart extends BackendDiff {
             }
         }
 
-        if ($pushEnabled
-            && method_exists($this->_jmapClient, 'waitForPushChange')
-            && $pushSupported
-            && $timeout > 0) {
-            try {
-                $pushTimeout = max(1, intval($timeout));
-                $pushNotified = $this->_jmapClient->waitForPushChange($pushTimeout);
-                if ($pushNotified) {
-                    list($hasChanges, $changedFolders) = $this->CollectChangedFoldersOnce();
-                    if ($hasChanges) {
-                        return $changedFolders;
-                    }
-                } else {
-                    return array();
-                }
-            } catch (Exception $e) {
-                ZLog::Write(LOGLEVEL_WARN, 'Stalwart->ChangesSink(): Push wait failed, falling back to poll: ' . $e->getMessage());
+        $source = 'catch-up';
+        while (true) {
+            // Check before connecting and after EVERY wait, including timeout,
+            // EOF and errors. SSE is a wake-up hint, not the source of sync state.
+            $changedFolders = $this->CollectChangedFoldersOnce();
+            if (!empty($changedFolders)) {
+                ZLog::Write(LOGLEVEL_INFO, 'Stalwart->ChangesSink(): source=' . $source . ' changed folders=' . implode(',', $changedFolders));
+                return $changedFolders;
             }
-        }
-
-        while (time() < $endTime) {
-            try {
-                list($hasChanges, $changedFolders) = $this->CollectChangedFoldersOnce();
-
-                if ($hasChanges) {
-                    return $changedFolders;
-                }
-
-            } catch (Exception $e) {
-                ZLog::Write(LOGLEVEL_WARN, 'Stalwart->ChangesSink(): Poll error: ' . $e->getMessage());
-                $this->_emailState = null;
-                $this->_contactState = null;
-                $this->_calendarEventState = null;
-                sleep(5);
+            $remaining = $endTime - microtime(true);
+            if ($remaining <= 0) {
                 return array();
             }
-
-            // Sleep before next poll (5 seconds)
-            if (time() + 5 < $endTime) {
-                sleep(5);
+            if ($pushSupported) {
+                $waitStarted = microtime(true);
+                try {
+                    ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->ChangesSink(): Waiting on JMAP event source');
+                    $notified = $this->_jmapClient->waitForPushChange(max(1, (int) ceil($remaining)));
+                    $source = $notified ? 'JMAP push' : 'push catch-up';
+                    if ($notified) {
+                        ZLog::Write(LOGLEVEL_INFO, sprintf('Stalwart->ChangesSink(): JMAP push received after %.2fs', microtime(true) - $waitStarted));
+                    } else {
+                        // A stream closed early: use polling for the remaining
+                        // interval instead of repeatedly reconnecting in a loop.
+                        $pushSupported = false;
+                    }
+                } catch (Exception $e) {
+                    ZLog::Write(LOGLEVEL_WARN, 'Stalwart->ChangesSink(): Push wait failed, falling back to poll: ' . $e->getMessage());
+                    $pushSupported = false;
+                    $source = 'push recovery';
+                }
+                // Some servers immediately send current state on connection.
+                // Avoid spinning if those events contain no relevant changes.
+                $changedFolders = $this->CollectChangedFoldersOnce();
+                if (!empty($changedFolders)) {
+                    ZLog::Write(LOGLEVEL_INFO, 'Stalwart->ChangesSink(): source=' . $source . ' changed folders=' . implode(',', $changedFolders));
+                    return $changedFolders;
+                }
+                $delay = min(1, $endTime - microtime(true));
             } else {
-                break;
+                $source = 'poll';
+                $delay = min(5, $remaining);
+            }
+            if ($delay > 0) {
+                usleep((int) ($delay * 1000000));
             }
         }
-
-        return array();
     }
 
 

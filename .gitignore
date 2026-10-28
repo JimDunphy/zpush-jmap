@@ -1,0 +1,19 @@
+# env files
+.env
+# Local environment variants, while retaining the generic public template.
+.env.*
+!.env.example
+*.env
+env.txt
+.claude/settings.local.json
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+zimbra74
+zimbra-docs
+zpush
+rust-lib/target/
+docs-private/
+/rebuild.txt
+.releases/
+__pycache__/

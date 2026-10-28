@@ -212,9 +212,9 @@ if [ ! -f "$AUTODISCOVER_CONFIG_FILE" ]; then
     echo "No autodiscover-config.php found. Copying default..."
     cp "$ZPUSH_SRC/autodiscover/config.php" "$AUTODISCOVER_CONFIG_FILE"
     chown www-data:www-data "$AUTODISCOVER_CONFIG_FILE"
-    # Also link it to where Z-Push expects to find it
-    ln -sf "$AUTODISCOVER_CONFIG_FILE" "$ZPUSH_SRC/autodiscover/config.php"
 fi
+# Recreate the link even when the persistent configuration already exists.
+ln -sf "$AUTODISCOVER_CONFIG_FILE" "$ZPUSH_SRC/autodiscover/config.php"
 
 # --- Enforce Correct Paths in BOTH Config Files ---
 echo "Verifying and setting persistent data paths..."
@@ -223,8 +223,11 @@ sed -i -E "s#^(\s*define\('STATE_DIR',).*#\1 '$STATE_DIR/');#" "$MAIN_CONFIG_FIL
 sed -i -E "s#^(\s*define\('LOGFILEDIR',).*#\1 '$LOG_DIR/');#" "$MAIN_CONFIG_FILE"
 # Force BackendStalwart
 sed -i -E "s#^(\s*define\('BACKEND_PROVIDER',\s*)'[^']*'#\1'BackendStalwart'#" "$MAIN_CONFIG_FILE"
+sed -i -E "s#^(\s*define\('USE_FULLEMAIL_FOR_LOGIN',).*#\1 true);#" "$MAIN_CONFIG_FILE"
 # Autodiscover config
 sed -i -E "s#^(\s*define\('LOGFILEDIR',).*#\1 '$LOG_DIR/');#" "$AUTODISCOVER_CONFIG_FILE"
+sed -i -E "s#^(\s*define\('BACKEND_PROVIDER',\s*)'[^']*'#\1'BackendStalwart'#" "$AUTODISCOVER_CONFIG_FILE"
+sed -i -E "s#^(\s*define\('USE_FULLEMAIL_FOR_LOGIN',).*#\1 true);#" "$AUTODISCOVER_CONFIG_FILE"
 
 # --- Configure Stalwart Backend from Environment Variables ---
 STALWART_CONFIG="/var/www/zpush/backend/stalwart/config.php"
@@ -291,11 +294,11 @@ NGINX_CLIENT_MAX_BODY_SIZE_SAFE="$(to_nginx_size_literal "NGINX_CLIENT_MAX_BODY_
 sed -i 's|unix:/run/php/php-fpm.sock|unix:/run/php/php8.2-fpm.sock|' /etc/nginx/conf.d/zpush.conf
 sed -i "s/\${ZPUSH_BIND_ADDRESS}/${ZPUSH_BIND_ADDRESS_SAFE}/g" /etc/nginx/conf.d/zpush.conf
 sed -i "s/\${ZPUSH_HTTP_PORT}/${ZPUSH_HTTP_PORT_SAFE}/g" /etc/nginx/conf.d/zpush.conf
-sed -i "s/^;?memory_limit = .*/memory_limit = ${PHP_MEMORY_LIMIT_SAFE}/" /etc/php/8.2/fpm/php.ini
-sed -i "s/^;?upload_max_filesize = .*/upload_max_filesize = ${PHP_UPLOAD_MAX_FILESIZE_SAFE}/" /etc/php/8.2/fpm/php.ini
-sed -i "s/^;?post_max_size = .*/post_max_size = ${PHP_POST_MAX_SIZE_SAFE}/" /etc/php/8.2/fpm/php.ini
-sed -i "s/^;?max_execution_time = .*/max_execution_time = ${PHP_MAX_EXECUTION_TIME_SAFE}/" /etc/php/8.2/fpm/php.ini
-sed -i "s/^;?max_input_time = .*/max_input_time = ${PHP_MAX_INPUT_TIME_SAFE}/" /etc/php/8.2/fpm/php.ini
+sed -i -E "s/^;?memory_limit = .*/memory_limit = ${PHP_MEMORY_LIMIT_SAFE}/" /etc/php/8.2/fpm/php.ini
+sed -i -E "s/^;?upload_max_filesize = .*/upload_max_filesize = ${PHP_UPLOAD_MAX_FILESIZE_SAFE}/" /etc/php/8.2/fpm/php.ini
+sed -i -E "s/^;?post_max_size = .*/post_max_size = ${PHP_POST_MAX_SIZE_SAFE}/" /etc/php/8.2/fpm/php.ini
+sed -i -E "s/^;?max_execution_time = .*/max_execution_time = ${PHP_MAX_EXECUTION_TIME_SAFE}/" /etc/php/8.2/fpm/php.ini
+sed -i -E "s/^;?max_input_time = .*/max_input_time = ${PHP_MAX_INPUT_TIME_SAFE}/" /etc/php/8.2/fpm/php.ini
 sed -i "s/client_max_body_size .*;$/client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE_SAFE};/" /etc/nginx/conf.d/zpush.conf
 chown www-data:www-data /run/php
 
