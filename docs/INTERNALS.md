@@ -245,6 +245,20 @@ Methods that dispatch by view: `GetMessageList`, `StatMessage`, `GetMessage`, `C
 
 Methods that are email-only: `SendMail`, `MoveMessage`, `SetReadFlag`, `GetAttachmentData`.
 
+### Outgoing email
+
+ActiveSync `SendMail` authenticates a fresh backend instance without the `Setup()`
+call made by Sync. The backend discovers folders in that request before selecting
+the mailbox with the JMAP `sent` role. The display name can be localized; no folder
+named Sent is required. A missing role or failed discovery returns submission-failed
+status 120 rather than selecting an arbitrary mailbox or emitting an empty status.
+
+The Rust extension uploads the MIME as a blob, imports it into that Sent mailbox,
+then submits it using `EmailSubmission/set`. A temporary MIME file is removed on
+success and failure. A submission error is not replayed automatically: delivery may
+be ambiguous after a transport failure. A Sent copy by itself does not prove
+delivery; confirm the submission result and recipient receipt.
+
 ## Change Tracking (ChangesSink)
 
 Tasks are mapped by `backend/stalwart/tasks.php` and the Rust `getTasks()` method.

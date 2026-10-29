@@ -14,6 +14,7 @@ class ZLog {
 }
 require 'vendor/autoload.php';
 define('SYNC_CONTACTS_MAXPICTURESIZE', 5242880);
+define('KOE_CAPABILITY_SENDFLAGS', false);
 require '/workspace/backend/stalwart/stalwart.php';
 (new ReflectionProperty(Request::class, 'asProtocolVersion'))->setValue(null, '14.1');
 set_error_handler(function ($severity, $message, $file, $line) {
@@ -94,7 +95,94 @@ class FreshSyncTestBackend extends BackendStalwart {
     }
 }
 
+class SendSyncJmap extends FakeSyncJmap {
+    public $hasSent = true;
+    public $failMailboxes = false;
+    public $failSubmission = false;
+    public $submissionResult = true;
+    public $submissions = [];
+    public $mimePath;
+    public function getMailboxes() {
+        $mailboxes = parent::getMailboxes();
+        if ($this->failMailboxes) throw new RuntimeException('Mailbox discovery unavailable');
+        if ($this->hasSent) $mailboxes[] = (object) [
+            'id'=>'sent-id', 'name'=>'Localized sent name', 'role'=>'sent',
+            'parent_id'=>null, 'total_emails'=>0, 'unread_emails'=>0,
+        ];
+        return $mailboxes;
+    }
+    public function sendEmail($path, $sentId) {
+        $this->mimePath = $path;
+        $this->submissions[] = ['sent'=>$sentId, 'mime'=>file_get_contents($path)];
+        if ($this->failSubmission) throw new RuntimeException('Submission rejected');
+        return $this->submissionResult;
+    }
+}
+
 $tests = [];
+$tests['Standalone SendMail discovers Sent without a preceding Sync request'] = function () {
+    $client = new SendSyncJmap();
+    $backend = new FreshSyncTestBackend($client);
+    $send = new SyncSendMail(); $send->mime = $client->raw;
+    check($backend->SendMail($send) === true, 'Fresh SendMail could not send');
+    check($client->mailboxCalls === 1, 'SendMail did not discover folders');
+    check($client->submissions === [['sent'=>'sent-id','mime'=>$client->raw]], 'Wrong mailbox or MIME submitted');
+    check(!file_exists($client->mimePath), 'Temporary MIME file retained after send');
+};
+$tests['SendMail never falls back to Inbox when Sent is absent'] = function () {
+    $client = new SendSyncJmap(); $client->hasSent = false;
+    $backend = new FreshSyncTestBackend($client); $backend->Setup('dummy');
+    $send = new SyncSendMail(); $send->mime = $client->raw;
+    check($backend->SendMail($send) === SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED && $client->submissions === [], 'Missing Sent submitted into an arbitrary mailbox');
+};
+$tests['SendMail reports folder discovery failure without submitting'] = function () {
+    $client = new SendSyncJmap(); $client->failMailboxes = true;
+    $backend = new FreshSyncTestBackend($client);
+    $send = new SyncSendMail(); $send->mime = $client->raw;
+    check($backend->SendMail($send) === SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED && $client->submissions === [], 'Discovery failure submitted a message');
+};
+$tests['SendMail accepts a MIME stream and cleans up after submission failure'] = function () {
+    $client = new SendSyncJmap(); $client->failSubmission = true;
+    $backend = new FreshSyncTestBackend($client); $backend->Setup('dummy');
+    $send = new SyncSendMail(); $send->mime = fopen('php://temp','w+'); fwrite($send->mime,$client->raw); rewind($send->mime);
+    try {
+        check($backend->SendMail($send) === SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED, 'Submission failure reported success');
+        check($client->submissions === [['sent'=>'sent-id','mime'=>$client->raw]], 'MIME stream was not forwarded unchanged');
+        check(!file_exists($client->mimePath), 'Temporary MIME file retained after failure');
+    } finally {fclose($send->mime);}
+};
+$tests['SendMail rejects empty MIME and unsuccessful submission results'] = function () {
+    $client = new SendSyncJmap(); $backend = new FreshSyncTestBackend($client);
+    $send = new SyncSendMail(); $send->mime = '';
+    check($backend->SendMail($send) === SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED && $client->submissions === [], 'Empty MIME was submitted');
+    $send->mime = $client->raw; $client->submissionResult = false;
+    check($backend->SendMail($send) === SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED, 'Unsuccessful result reported success');
+    check(!file_exists($client->mimePath), 'Temporary MIME file retained after unsuccessful result');
+};
+$tests['SendMail failures return a decodable ActiveSync submission status'] = function () {
+    $client = new SendSyncJmap(); $client->hasSent = false;
+    $request = fopen('php://temp','w+'); $encoder = new WBXMLEncoder($request); $encoder->startWBXML(); $encoder->startTag(SYNC_COMPOSEMAIL_SENDMAIL);
+    $mail = new SyncSendMail(); $mail->clientid = 'send-regression'; $mail->mime = $client->raw; $mail->Encode($encoder); $encoder->endTag(); rewind($request);
+    $response = fopen('php://temp','w+'); $values = [
+        'backend'=>new FreshSyncTestBackend($client),
+        'deviceManager'=>new class {},
+        'topCollector'=>new class {public function AnnounceInformation($message,$important=false) {}},
+        'decoder'=>new WBXMLDecoder($request), 'encoder'=>new WBXMLEncoder($response),
+    ];
+    $saved = []; $command = new ReflectionProperty(Request::class,'command'); $previous = $command->getValue(); $command->setValue(null,'SendMail');
+    try {
+        foreach ($values as $name=>$value) {$p=new ReflectionProperty(RequestProcessor::class,$name); $saved[$name]=$p->getValue(); $p->setValue(null,$value);}
+        check((new SendMail())->Handle(ZPush::COMMAND_SENDMAIL) === SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED, 'Failure did not return a protocol status');
+        rewind($response); $decoder = new WBXMLDecoder($response);
+        check((bool)$decoder->getElementStartTag(SYNC_COMPOSEMAIL_SENDMAIL),'Missing SendMail response');
+        check((bool)$decoder->getElementStartTag(SYNC_COMPOSEMAIL_STATUS),'Missing failure status');
+        check($decoder->getElementContent()===(string)SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED,'Incorrect failure status');
+        check($client->submissions===[],'Failed request submitted a message');
+    } finally {
+        foreach ($saved as $name=>$value) (new ReflectionProperty(RequestProcessor::class,$name))->setValue(null,$value);
+        $command->setValue(null,$previous); fclose($request); fclose($response);
+    }
+};
 $client = new FakeSyncJmap();
 $backend = new SyncTestBackend($client);
 $tests['Opening a message in a fresh request initializes its folder'] = function () {

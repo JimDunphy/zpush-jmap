@@ -2232,7 +2232,7 @@ class BackendStalwart extends BackendDiff {
         ZLog::Write(LOGLEVEL_DEBUG, 'Stalwart->SendMail(): START');
 
         if (!$this->_jmapClient) {
-            return false;
+            return SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED;
         }
 
         // Get the raw MIME content
@@ -2243,47 +2243,37 @@ class BackendStalwart extends BackendDiff {
 
         if (empty($mime)) {
             ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->SendMail(): Empty MIME content');
-            return false;
-        }
-
-        // Ensure we have the sent folder ID
-        if (!$this->_sentID) {
-            // Try to find it from folders
-            foreach ($this->_folders as $folder) {
-                if ($folder->role == 'sent') {
-                    $this->_sentID = $folder->id;
-                    break;
-                }
-            }
-        }
-
-        $sentFolderId = $this->_sentID;
-        if (!$sentFolderId) {
-            ZLog::Write(LOGLEVEL_WARN, 'Stalwart->SendMail(): No Sent folder found, using first available mailbox');
-            if (!empty($this->_folders)) {
-                $sentFolderId = $this->_folders[0]->id;
-            } else {
-                ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->SendMail(): No folders available');
-                return false;
-            }
+            return SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED;
         }
 
         try {
+            // SendMail authenticates a new backend instance without the Setup()
+            // call made by Sync. Discover this request's folders before sending.
+            if (empty($this->_folders) && !$this->Setup($this->_user)) {
+                throw new RuntimeException('Unable to discover mailboxes for sending');
+            }
+            if (!$this->_sentID) {
+                throw new RuntimeException('No mailbox with the JMAP sent role is available');
+            }
+
             // Write MIME to temp file (Rust reads from file to handle binary safely)
             $tmpFile = tempnam(sys_get_temp_dir(), 'zpush_send_');
-            file_put_contents($tmpFile, $mime);
-
-            $result = $this->_jmapClient->sendEmail($tmpFile, $sentFolderId);
-
-            if (file_exists($tmpFile)) unlink($tmpFile);
+            if ($tmpFile === false || file_put_contents($tmpFile, $mime) !== strlen($mime)) {
+                throw new RuntimeException('Unable to prepare MIME for sending');
+            }
+            if ($this->_jmapClient->sendEmail($tmpFile, $this->_sentID) !== true) {
+                throw new RuntimeException('JMAP submission did not report success');
+            }
 
             ZLog::Write(LOGLEVEL_INFO, 'Stalwart->SendMail(): Message sent successfully');
-            return $result;
+            return true;
 
         } catch (Exception $e) {
-            if (isset($tmpFile) && file_exists($tmpFile)) unlink($tmpFile);
             ZLog::Write(LOGLEVEL_ERROR, 'Stalwart->SendMail(): Error: ' . $e->getMessage());
-            return false;
+            // False becomes an empty WBXML status and a generic core failure.
+            return SYNC_COMMONSTATUS_MAILSUBMISSIONFAILED;
+        } finally {
+            if (isset($tmpFile) && $tmpFile !== false && file_exists($tmpFile)) unlink($tmpFile);
         }
     }
 

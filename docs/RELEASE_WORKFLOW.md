@@ -9,7 +9,7 @@ updates an existing installation; use QUICK_START.md for a first installation.
 
 ```bash
 cd zpush-jmap/nginx
-./manage.sh --set-image local/zpush:0.2.4
+./manage.sh --set-image local/zpush:0.2.5
 ./manage.sh --build --refresh
 ```
 
@@ -27,7 +27,9 @@ convenience and generic deployment examples. Version 0.2.2 fixes task writes on
 servers that reject the optional completion timestamp. Version 0.2.3 fixes
 push notifications hidden by an empty saved device folder mapping. Version 0.2.4
 fixes empty completion dates when native timestamps are absent and resends the
-affected task responses once. Update VERSION before
+affected task responses once. Version 0.2.5 fixes standalone outgoing email by
+discovering the Sent mailbox within each SendMail request and returning explicit
+submission failures. Update VERSION before
 building the next application release. Rebuilds of the same application version
 can use distinct image tags; their exact identity is the image ID/source hash.
 

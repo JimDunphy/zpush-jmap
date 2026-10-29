@@ -4,6 +4,7 @@
 .env.*
 !.env.example
 *.env
+README.JAD
 env.txt
 .claude/settings.local.json
 CLAUDE.md
