@@ -38,6 +38,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('nginx/release.py',names)
         self.assertIn('VERSION',names)
         self.assertIn('tests/.env.example',names)
+        self.assertIn('tools/eas_trace.py',names)
+        self.assertIn('tests/test_eas_lifecycle.py',names)
         self.assertFalse(any('/zpush/' in p or ('/.env' in p and not p.endswith('/.env.example')) or p.startswith('docs-private/') or '/target/' in p or '/.releases/' in p for p in names))
 
     def test_receipt_rejects_changed_source_and_retagged_image(self):

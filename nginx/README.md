@@ -69,6 +69,14 @@ Autodiscover uses the framework's dedicated PHP entry point and persistent
 configuration. Startup selects `BackendStalwart` and full-email login for both
 ActiveSync and Autodiscover, and relinks their configuration on container recreation.
 
+Set `ZPUSH_HOST=sync.example.com` in `.env` when Autodiscover should advertise a
+canonical HTTPS server, especially if discovery uses a different hostname.
+An optional port is supported (`sync.example.com:8443`), as are IPv4 and bracketed
+IPv6 addresses. Schemes, paths, user information, whitespace and invalid hostnames
+are rejected before persistent configuration is changed. Leave the value empty
+to use the incoming Host header. Removing it clears an earlier persisted override.
+Both discovery and sync hostnames must have valid HTTPS routing and certificates.
+
 ## Privilege Model
 
 This image intentionally does not set a `USER` directive in `nginx/Dockerfile`.

@@ -259,6 +259,27 @@ success and failure. A submission error is not replayed automatically: delivery 
 be ambiguous after a transport failure. A Sent copy by itself does not prove
 delivery; confirm the submission result and recipient receipt.
 
+### Autodiscover
+
+The dedicated Autodiscover entry point passes an XML email value into `Logon()`.
+Normalize username and password to strings before storing them, evaluating policy
+or calling the typed Rust FFI. This adopts the focused login correction identified
+in [PR #2](https://github.com/JimDunphy/zpush-jmap/pull/2); its calendar-write
+changes are not included.
+
+The optional `ZPUSH_HOST` environment setting fixes the advertised HTTPS authority
+when discovery and synchronization use different hostnames. Compose forwards it
+explicitly. Startup validates hostname/IP syntax and optional port 1–65535 before
+modifying persistent files, and PHP writes the configuration using `var_export`
+and a callback replacement. The value is never interpolated into sed or PHP code.
+An empty value restores Host-header discovery and removes a stale persisted
+override. Persistent configuration and symlinks survive container recreation.
+
+`tests/test_autodiscover.py` exercises authenticated XML POSTs through real Nginx,
+PHP and Rust using dummy credentials and a loopback JMAP fixture. It checks failed
+authentication, canonical URLs, persistence, changing/removing overrides, IPv4/IPv6,
+Compose forwarding and rejection of malformed/injection input before config writes.
+
 ## Change Tracking (ChangesSink)
 
 Tasks are mapped by `backend/stalwart/tasks.php` and the Rust `getTasks()` method.
@@ -294,6 +315,13 @@ At INFO level, `ChangesSink(): JMAP push received` confirms an upstream event;
 At DEBUG level, `Waiting on JMAP event source` records each push wait. A completed
 Ping and subsequent Sync, followed by the device updating its view, complete the
 end-to-end check.
+
+The complete HTTP and state lifecycle is covered by `tests/test_eas_lifecycle.py`,
+including replay before acknowledgment and settlement after SyncKey reuse.
+`tools/eas_trace.py` reads body-only captures with bounded parsing and pseudonymized
+IDs; it never treats response-only evidence as a client acknowledgment. See
+[mail deletion diagnostics](MAIL_DELETION_DIAGNOSTICS.md) for the historical
+observation, tested scenarios and remaining uncertainty.
 
 ## ActiveSync Timezone Blob
 

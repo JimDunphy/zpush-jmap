@@ -17,6 +17,29 @@ die() {
     exit 1
 }
 
+validate_public_host_literal() {
+    ZPUSH_PUBLIC_HOST_INPUT="$1" php <<'PHP'
+<?php
+$value = getenv('ZPUSH_PUBLIC_HOST_INPUT');
+if ($value === '') exit(0);
+if (!preg_match('/\A(?:\[([0-9a-fA-F:]+)\]|([a-zA-Z0-9.-]+))(?::([0-9]{1,5}))?\z/', $value, $parts)) exit(1);
+if (!empty($parts[1])) {
+    if (!filter_var($parts[1], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) exit(1);
+} else {
+    $host = $parts[2];
+    if (strlen($host) > 253 || !filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME)) exit(1);
+    if (preg_match('/\A[0-9.]+\z/', $host) && !filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) exit(1);
+}
+if (isset($parts[3]) && ((int) $parts[3] < 1 || (int) $parts[3] > 65535)) exit(1);
+echo $value;
+PHP
+}
+
+# Validate before touching persistent configuration. Pass values as data to PHP,
+# never as shell/sed/PHP source text.
+ZPUSH_HOST_SAFE="$(validate_public_host_literal "${ZPUSH_HOST:-}")" \
+    || die 'Invalid ZPUSH_HOST: expected a hostname or IP address with an optional port'
+
 to_php_bool_literal() {
     local name="$1"
     local raw="$2"
@@ -228,6 +251,23 @@ sed -i -E "s#^(\s*define\('USE_FULLEMAIL_FOR_LOGIN',).*#\1 true);#" "$MAIN_CONFI
 sed -i -E "s#^(\s*define\('LOGFILEDIR',).*#\1 '$LOG_DIR/');#" "$AUTODISCOVER_CONFIG_FILE"
 sed -i -E "s#^(\s*define\('BACKEND_PROVIDER',\s*)'[^']*'#\1'BackendStalwart'#" "$AUTODISCOVER_CONFIG_FILE"
 sed -i -E "s#^(\s*define\('USE_FULLEMAIL_FOR_LOGIN',).*#\1 true);#" "$AUTODISCOVER_CONFIG_FILE"
+
+# Keep the canonical endpoint in persistent config aligned with the environment,
+# including returning to Host-header discovery when the override is removed.
+ZPUSH_PUBLIC_HOST="$ZPUSH_HOST_SAFE" ZPUSH_AUTODISCOVER_CONFIG="$AUTODISCOVER_CONFIG_FILE" php <<'PHP'
+<?php
+$path = getenv('ZPUSH_AUTODISCOVER_CONFIG');
+$source = file_get_contents($path);
+$host = getenv('ZPUSH_PUBLIC_HOST');
+$replacement = $host === '' ? "// define('ZPUSH_HOST', 'sync.example.com');"
+    : "define('ZPUSH_HOST', " . var_export($host, true) . ");";
+$count = 0;
+$source = preg_replace_callback('/^[\t ]*(?:\/\/[\t ]*)?define\([\'"]ZPUSH_HOST[\'"],[^\r\n]*\);[^\r\n]*$/m',
+    function () use (&$count, $replacement) { return $count++ === 0 ? '    ' . $replacement : ''; }, $source);
+if ($count === 0 || $source === null || file_put_contents($path, $source) === false) {
+    fwrite(STDERR, "Unable to configure Autodiscover hostname\n"); exit(1);
+}
+PHP
 
 # --- Configure Stalwart Backend from Environment Variables ---
 STALWART_CONFIG="/var/www/zpush/backend/stalwart/config.php"

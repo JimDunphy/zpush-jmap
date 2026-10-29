@@ -9,7 +9,7 @@ updates an existing installation; use QUICK_START.md for a first installation.
 
 ```bash
 cd zpush-jmap/nginx
-./manage.sh --set-image local/zpush:0.2.5
+./manage.sh --set-image local/zpush:0.2.6
 ./manage.sh --build --refresh
 ```
 
@@ -29,7 +29,9 @@ push notifications hidden by an empty saved device folder mapping. Version 0.2.4
 fixes empty completion dates when native timestamps are absent and resends the
 affected task responses once. Version 0.2.5 fixes standalone outgoing email by
 discovering the Sent mailbox within each SendMail request and returning explicit
-submission failures. Update VERSION before
+submission failures. Version 0.2.6 fixes Autodiscover's XML username conversion
+and adds a validated, Compose-wired `ZPUSH_HOST` override with restart and
+authentication coverage. Update VERSION before
 building the next application release. Rebuilds of the same application version
 can use distinct image tags; their exact identity is the image ID/source hash.
 
@@ -53,7 +55,9 @@ the destination's report directly from the build host.
 
 Verification checks PHP CLI/FPM packages against the minimum fixed Bookworm
 version `8.2.35-1~deb12u1`, extension loading, copied source files, mail/push/task
-regressions, compiled Rust HTTP fixtures, deployment rollback, and clean startup
+regressions, compiled Rust HTTP fixtures, authenticated Autodiscover and hostname
+validation, complete HTTP Ping/Sync deletion lifecycle and trace diagnostics,
+deployment rollback, and clean startup
 with fresh data. Network fixtures use dummy credentials and loopback; startup
 uses Docker networking disabled. No live account is changed.
 

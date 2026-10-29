@@ -49,7 +49,7 @@ published examples contain no deployment destination.
 | Full Zimbra suite parity | Not a full drop-in replacement for every Zimbra Network module and workflow | Position as modular migration path: Stalwart + `zpush-jmap` + Project Z-Bridge |
 | Device management depth | ABQ allow/block/quarantine rules are available, but no full enterprise MDM console in this repo | Use ABQ policy + existing firewall/VPN controls; integrate external MDM where required |
 | Task editing scope | Ordinary tasks support create, edit, completion, moves, deletion, and push; recurring and assigned task edits return failure | Use a capable calendar/task client for advanced task workflows; see `docs/TASKS.md` |
-| iOS Mail deletion display | In the iOS 26.6.2 rehearsal, externally deleted messages remained visible after Mail acknowledged the ActiveSync deletion; arrival push worked | Pull down to refresh the Inbox. Root cause remains unresolved; disabling threading did not resolve it |
+| iOS Mail deletion display | In the iOS 26.6.2 rehearsal, externally deleted messages remained visible after the client reused the deletion response's SyncKey; arrival push worked | Pull down to refresh the Inbox. Root cause remains unresolved; key reuse proves response receipt, not application or display. See [investigation and diagnostics](docs/MAIL_DELETION_DIAGNOSTICS.md) |
 | Built-in HA orchestration | Multi-host is supported architecturally, but orchestration/operations are operator-managed | Follow shared-state + DNS/LB guidance in docs for scale-out deployments |
 | Turnkey migration tooling | Automated migration/assessment tooling is outside this repository | Use staged pilot migrations and documented rollback/image promotion process |
 | Commercial support model | Open-source project; no bundled enterprise support SLA from this repo | Use internal ops ownership or partner support model where needed |
@@ -409,6 +409,8 @@ docker run --rm --network none --entrypoint php -v "$PWD:/workspace:ro" \
 docker run --rm --network none --entrypoint php -v "$PWD:/workspace:ro" \
   local/zpush:latest /workspace/tests/test_backend_push.php
 python3 tests/test_push_transport.py --image local/zpush:latest
+python3 tests/test_eas_lifecycle.py --image local/zpush:latest
+python3 tests/test_eas_trace.py
 ```
 
 The push tests cover sink registration, arrival/deletion notifications, moves,
@@ -416,6 +418,11 @@ initialization gaps, missed events, disconnects, expired tokens, and independent
 calendar failures. The Python test runs the compiled Rust extension against a
 loopback HTTP/SSE fixture with dummy credentials; it requires Docker host
 networking on Linux.
+
+The lifecycle suite adds real HTTP Ping/Sync/SyncKey and persisted-state coverage,
+including deletion retries, paging, mixed read/deletion changes and restart
+recovery. It uses dummy data and no live mailbox. See the [deletion investigation](docs/MAIL_DELETION_DIAGNOSTICS.md)
+for the distinction between response receipt, command application and iOS display.
 
 An integration test suite exercises every Rust FFI method against a live Stalwart server:
 

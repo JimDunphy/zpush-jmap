@@ -473,6 +473,10 @@ class BackendStalwart extends BackendDiff {
      * Authenticates the user and establishes a JMAP session.
      */
     public function Logon($username, $domain, $password) {
+        // Autodiscover passes its email address as a SimpleXMLElement; the
+        // Rust FFI accepts strings. Normalize before storing or using it.
+        $username = (string) $username;
+        $password = (string) $password;
         if (class_exists("Request")) {
             $this->_protocolversion = Request::GetProtocolVersion();
         } else {

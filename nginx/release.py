@@ -64,7 +64,8 @@ def release_files():
     names += [p.relative_to(ROOT).as_posix() for p in (ROOT / 'tests').glob('test_*.py')]
     names += ['README.md', 'LICENSE', 'THIRD_PARTY_LICENSES.md', '.gitignore', '.gitattributes',
               'nginx/manage.sh', 'nginx/release.py', 'nginx/env.example', 'nginx/README.md',
-              'nginx/host-nginx.conf.example', 'tests/run_tests.sh', 'tests/.env.example']
+              'nginx/host-nginx.conf.example', 'tests/run_tests.sh', 'tests/.env.example',
+              'tools/eas_trace.py']
     return sorted(set(names))
 
 
@@ -109,9 +110,10 @@ def verify(image):
     for suite in ('test_backend_sync.php', 'test_backend_push.php', 'test_backend_tasks.php'):
         run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'php',
              '-v', str(ROOT) + ':/workspace:ro', image, '/workspace/tests/' + suite])
-    for suite in ('test_push_transport.py', 'test_tasks_transport.py'):
+    for suite in ('test_push_transport.py', 'test_tasks_transport.py', 'test_autodiscover.py', 'test_eas_lifecycle.py'):
         run(['python3', str(ROOT / 'tests' / suite), '--image', image])
     run(['python3', str(ROOT / 'tests/test_release.py')])
+    run(['python3', str(ROOT / 'tests/test_eas_trace.py')])
     name = 'zpush-verify-' + uuid.uuid4().hex[:12]
     try:
         run(['docker', 'run', '-d', '--pull', 'never', '--network', 'none', '--name', name,
@@ -136,7 +138,7 @@ def verify(image):
     if manifest(release_files()) != start or fingerprint() != source_hash:
         raise RuntimeError('Source changed during verification; verify again')
     receipt = dict(application_version=application_version(), image_id=info['Id'], image_tag=image, source_sha256=source_hash, files=start,
-                   verified_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), checks='php,source,sync,push,tasks,transport,release,startup')
+                   verified_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), checks='php,source,sync,push,tasks,transport,autodiscover,eas-lifecycle,trace,release,startup')
     RELEASES.mkdir(mode=0o700, exist_ok=True)
     receipt_path(info['Id']).write_text(json.dumps(receipt, indent=2) + '\n')
     print('VERIFIED ' + image + ' ' + info['Id'], flush=True)

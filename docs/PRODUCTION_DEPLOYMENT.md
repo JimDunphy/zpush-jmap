@@ -97,7 +97,7 @@ Example (from repo root):
 ```bash
 vi VERSION
 cd nginx
-./manage.sh --set-image local/zpush:0.2.5
+./manage.sh --set-image local/zpush:0.2.6
 ./manage.sh --build
 ./manage.sh --verify-image
 ./manage.sh --deploy --dry-run

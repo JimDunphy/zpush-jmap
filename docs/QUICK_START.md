@@ -32,19 +32,19 @@ other applications on 443.
 ## 2. Build and export on the development machine
 
 Start from a checkout of this source. Use a release tag of your choice consistently
-on both hosts; the commands below use the application release `local/zpush:0.2.5`
+on both hosts; the commands below use the application release `local/zpush:0.2.6`
 as an example. The current application version is recorded in root `VERSION`.
 
 ```bash
 cd zpush-jmap/nginx
 ./manage.sh --init
-./manage.sh --set-image local/zpush:0.2.5
+./manage.sh --set-image local/zpush:0.2.6
 ./manage.sh --build --refresh
 ./manage.sh --verify-image
-./manage.sh --export-image /tmp/zpush-0.2.5.tar.gz
+./manage.sh --export-image /tmp/zpush-0.2.6.tar.gz
 cd /tmp
-sha256sum zpush-0.2.5.tar.gz > zpush-0.2.5.tar.gz.sha256
-scp zpush-0.2.5.tar.gz zpush-0.2.5.tar.gz.sha256 admin@sync-host:/tmp/
+sha256sum zpush-0.2.6.tar.gz > zpush-0.2.6.tar.gz.sha256
+scp zpush-0.2.6.tar.gz zpush-0.2.6.tar.gz.sha256 admin@sync-host:/tmp/
 ```
 
 If Docker bridge networking is unavailable during compilation, set
@@ -76,11 +76,11 @@ cd zpush-jmap/nginx
 Edit `nginx/.env` in this checkout:
 
 ```dotenv
-ZPUSH_IMAGE=local/zpush:0.2.5
+ZPUSH_IMAGE=local/zpush:0.2.6
 ZPUSH_BIND_ADDRESS=127.0.0.1
 ZPUSH_HTTP_PORT=10000
 STALWART_URL=https://stalwart.example.com
-STALWART_BACKEND_VERSION=0.2.5
+STALWART_BACKEND_VERSION=0.2.6
 STALWART_SSL_VERIFYPEER=true
 STALWART_SSL_VERIFYHOST=true
 STALWART_ALLOW_INSECURE_HTTP=false
@@ -97,9 +97,9 @@ Verify the transferred archive, then return to the deployment checkout:
 
 ```bash
 cd /tmp
-sha256sum -c zpush-0.2.5.tar.gz.sha256
+sha256sum -c zpush-0.2.6.tar.gz.sha256
 cd /path/to/zpush-jmap/nginx
-./manage.sh --import-image /tmp/zpush-0.2.5.tar.gz
+./manage.sh --import-image /tmp/zpush-0.2.6.tar.gz
 ./manage.sh --up-no-build
 ./manage.sh --health
 ./manage.sh --version
@@ -117,6 +117,12 @@ Copy [the host Nginx example](../nginx/host-nginx.conf.example) into your host's
 Nginx configuration directory as a new virtual-host file. Replace the hostname
 and certificate paths before enabling it. The example routes ActiveSync and
 Autodiscover to the container and returns 404 for other paths.
+
+If discovery uses a different hostname, set `ZPUSH_HOST=sync.example.com` in the
+container's `nginx/.env` so the response advertises the canonical synchronization
+server. Use only a hostname or IP address, optionally followed by a port; omit the
+scheme and path. Both names need valid HTTPS routing and certificates. Leaving
+the setting empty uses the request's Host header.
 
 Certificate paths can point to existing files shared with another service; a
 second copy is not required. Ensure the Nginx master can read the certificate
@@ -151,8 +157,9 @@ arrival. Logs are available through `nginx/manage.sh --logs` and under
 `nginx/zpush/log/`.
 
 **Known limitation:** the iOS 26.6.2 rehearsal showed immediate arrival push,
-but messages deleted in another client could remain visible after iOS
-acknowledged their ActiveSync deletion. Pull down to refresh the Inbox after
+but messages deleted in another client could remain visible after iOS reused
+the deletion response's SyncKey. This establishes receipt, not application of
+the deletion. Pull down to refresh the Inbox after
 external deletions. Disabling threading did not resolve it; the root cause is
 still unresolved.
 
